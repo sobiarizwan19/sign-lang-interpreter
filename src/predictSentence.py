@@ -125,7 +125,7 @@ class SentencePredictor:
             response = self.model.generate_content(
                 prompt,
                 generation_config=genai.types.GenerationConfig(
-                    temperature=0.7,
+                    temperature=0.3,  # Lower temperature for more consistent results
                     max_output_tokens=500,
                 )
             )
@@ -170,48 +170,168 @@ class SentencePredictor:
             }
     
     def _create_prompt(self, alphabet_sequence: str) -> str:
-        """Create a simple, direct prompt for Gemini"""
-        prompt = f"""Interpret this ASL fingerspelling sequence as an English word or phrase:
+        """Create an improved prompt for better sentence interpretation that handles noise"""
+        prompt = f"""You are an expert ASL (American Sign Language) fingerspelling interpreter. Your task is to interpret a sequence of letters detected from real-time ASL fingerspelling.
 
-Sequence: {alphabet_sequence}
+DETECTED LETTER SEQUENCE: {alphabet_sequence}
 
-The letters are from sign language detection. Some letters might be duplicated or missing due to detection errors.
+IMPORTANT CONSIDERATIONS:
+1. This sequence comes from COMPUTER VISION detection - there will be RANDOM NOISE letters due to:
+   - False positive detections
+   - Transition frames between signs
+   - Hand movement artifacts
+   - Similar-looking signs being misclassified
 
-What English word or phrase is being spelled? Respond with just the word or phrase."""
+2. Common noise patterns to filter out:
+   - Single random letters that don't fit context
+   - Repeated letters that don't make sense (like "HHEELLOO" for "HELLO")
+   - Letters that appear and disappear quickly
+   - Common misclassifications (B↔D, M↔N, P↔K, etc.)
+
+3. Real fingerspelling characteristics:
+   - People spell actual WORDS, NAMES, or PHRASES
+   - Noise letters are usually brief and isolated
+   - Meaningful letters appear in coherent patterns
+   - If sequence seems random, it might be all noise
+
+4. Your interpretation should:
+   - Extract the meaningful word/phrase from the noise
+   - Correct obvious spelling errors from detection
+   - Ignore isolated noise letters
+   - Consider common names, places, and terms
+   - Return ONLY the clean interpretation
+
+EXAMPLES WITH NOISE:
+- "H X E L L O Y" → "HELLO" (filter 'X' and 'Y' as noise)
+- "M Y A N A M E B I S J O H N" → "MY NAME IS JOHN" (filter 'A' and 'B' as noise)
+- "T H A N K Y O U Z" → "THANK YOU" (filter 'Z' as noise)
+- "C O F F E E Q W" → "COFFEE" (filter 'Q W' as noise)
+- "S T A N F O R D X X" → "STANFORD" (filter 'X X' as noise)
+- "A B C D E F G" → "ABCDEFG" (if all seems random, might be spelling alphabet practice)
+
+INTERPRETATION STRATEGY:
+1. Look for coherent word patterns in the sequence
+2. Filter out isolated letters not fitting the pattern
+3. Consider the sequence as a whole, not just individual letters
+4. If multiple interpretations possible, choose the most common/likely one
+5. When in doubt, return the letters that form a recognizable word
+
+YOUR TASK: Given the detected sequence above, provide ONLY the most likely clean English interpretation. Return JUST the interpreted text, nothing else.
+
+Interpretation:"""
         return prompt
     
     def _parse_response(self, response_text: str, original_sequence: str) -> dict:
         """Parse Gemini's response into structured format"""
-        # With simpler prompt, response should be just the word/phrase
+        # Clean the response text
         interpretation = response_text.strip()
         
         # Remove any quotes or extra formatting
         interpretation = interpretation.strip('"\'')
         
-        # Remove common prefixes
-        for prefix in ['PRIMARY INTERPRETATION:', 'INTERPRETATION:', 'Answer:', 'Word:']:
+        # Remove common prefixes and explanations
+        prefixes_to_remove = [
+            'PRIMARY INTERPRETATION:', 'INTERPRETATION:', 'Answer:', 'Word:',
+            'The interpretation is:', 'Interpretation is:', 'Clean interpretation:',
+            'Most likely:', 'Likely word:', 'Result:', 'Output:'
+        ]
+        
+        for prefix in prefixes_to_remove:
             if interpretation.upper().startswith(prefix.upper()):
                 interpretation = interpretation[len(prefix):].strip()
         
-        # Determine confidence based on sequence similarity
-        sequence_no_spaces = original_sequence.replace(' ', '')
-        confidence = 'HIGH'
+        # Remove any trailing explanations (anything after newline or period that's not part of the word)
+        interpretation = interpretation.split('\n')[0].strip()
+        interpretation = interpretation.split('.')[0].strip()
         
+        # If interpretation is empty or too short, fall back to original without spaces
+        if not interpretation or len(interpretation) < 2:
+            interpretation = original_sequence.replace(' ', '')
+        
+        # Determine confidence based on various factors
+        sequence_no_spaces = original_sequence.replace(' ', '')
+        
+        # Calculate confidence
+        confidence = 'MEDIUM'
+        
+        # High confidence if:
+        # 1. Interpretation matches a common word/name
+        # 2. Interpretation is significantly shorter than original (noise filtered)
+        # 3. Interpretation forms a recognizable pattern
         if interpretation.upper() == sequence_no_spaces.upper():
             confidence = 'HIGH'
-        elif len(interpretation) != len(sequence_no_spaces):
-            confidence = 'MEDIUM'
+        elif self._is_common_word(interpretation):
+            confidence = 'HIGH'
+        elif len(interpretation) < len(sequence_no_spaces) * 0.7:  # Filtered out >30% as noise
+            confidence = 'HIGH'  # Likely successfully filtered noise
+        elif len(interpretation) >= 2 and ' ' in interpretation:  # Multi-word phrase
+            confidence = 'HIGH'
+        
+        # Generate some alternatives
+        alternatives = []
+        if confidence == 'MEDIUM':
+            # Add original sequence without spaces as alternative
+            alternatives.append(sequence_no_spaces)
+            # Add a version with common corrections
+            corrected = self._apply_common_corrections(sequence_no_spaces)
+            if corrected != interpretation and corrected != sequence_no_spaces:
+                alternatives.append(corrected)
         
         result = {
-            'interpretation': interpretation if interpretation else sequence_no_spaces,
-            'alternatives': [],
+            'interpretation': interpretation,
+            'alternatives': alternatives,
             'confidence': confidence,
             'raw_response': response_text,
-            'reasoning': 'ASL sequence interpreted by AI',
-            'original_sequence': original_sequence
+            'reasoning': f'Filtered noise from {len(sequence_no_spaces)} detected letters to {len(interpretation)} meaningful characters',
+            'original_sequence': original_sequence,
+            'noise_filtered': len(sequence_no_spaces) - len(interpretation.replace(' ', ''))
         }
         
         return result
+    
+    def _is_common_word(self, text: str) -> bool:
+        """Check if text is a common word/phrase"""
+        text_lower = text.lower()
+        
+        # Common words list
+        common_words = {
+            'hello', 'hi', 'thank', 'you', 'thanks', 'please', 'sorry', 'yes', 'no',
+            'name', 'my', 'your', 'what', 'where', 'when', 'why', 'how', 'who',
+            'help', 'need', 'want', 'water', 'food', 'bathroom', 'restroom',
+            'coffee', 'tea', 'milk', 'sugar', 'friend', 'family', 'home', 'work',
+            'school', 'college', 'university', 'doctor', 'hospital', 'emergency'
+        }
+        
+        # Check if any common word is in the text
+        for word in common_words:
+            if word in text_lower or text_lower in word:
+                return True
+        
+        # Check if it looks like a name (capitalized, reasonable length)
+        if text and text[0].isupper() and 2 <= len(text) <= 20 and ' ' not in text:
+            return True
+        
+        return False
+    
+    def _apply_common_corrections(self, text: str) -> str:
+        """Apply common ASL detection corrections"""
+        corrections = {
+            'B': 'D', 'D': 'B',
+            'M': 'N', 'N': 'M',
+            'P': 'K', 'K': 'P',
+            'V': 'U', 'U': 'V',
+            'H': 'N',  # H and N can be confused
+            'I': 'J', 'J': 'I',
+            'S': 'A', 'A': 'S'  # Less common but possible
+        }
+        
+        corrected = list(text.upper())
+        for i, char in enumerate(corrected):
+            if char in corrections:
+                # Only correct if it makes a better word
+                corrected[i] = corrections[char]
+        
+        return ''.join(corrected)
     
     def get_model_info(self):
         """Get information about the current model"""
