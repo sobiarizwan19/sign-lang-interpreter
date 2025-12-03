@@ -1,682 +1,339 @@
 #!/usr/bin/env python3
-"""
-ASL Video Analyzer - NiceGUI Application
-A beautiful, self-contained application for ASL video analysis
-"""
 
 import os
 import sys
-import asyncio
 import tempfile
-import uuid
-import traceback
 import cv2
 from pathlib import Path
-from typing import Optional, Dict, Any
-import logging
+from nicegui import ui, app
+from dotenv import load_dotenv
 
-# Add src directory to path for imports
-current_dir = Path(__file__).parent.absolute()
-src_dir = current_dir / 'src'
-if src_dir.exists():
-    sys.path.insert(0, str(src_dir))
+# Load environment variables
+load_dotenv()
 
-# NiceGUI imports
-from nicegui import ui
-from nicegui.events import UploadEventArguments
-import nicegui
-
-# Try to import ASL components
-COMPONENTS_AVAILABLE = False
+# Import ASL modules
 try:
-    from signPredict import ASLClassifier
-    from predictSentence import SentencePredictor
-    from asl_console_analyzer import ASLConsoleAnalyzer
-    COMPONENTS_AVAILABLE = True
+    from src.signPredict import ASLClassifier
+    from src.predictSentence import SentencePredictor
     print("✓ All ASL components imported successfully")
 except ImportError as e:
-    print(f"✗ Failed to import ASL components: {e}")
-    print("Make sure signPredict.py, predictSentence.py, and asl_console_analyzer.py are in the src/ directory")
+    print(f"✗ Import error: {e}")
+    sys.exit(1)
 
 # Configuration
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
-ALLOWED_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
-UPLOAD_DIR = Path('uploads')
-UPLOAD_DIR.mkdir(exist_ok=True)
+VIDEO_PATH = os.getenv('VIDEO_PATH', '../content/demo.mp4')
+FRAME_GAP = int(os.getenv('FRAME_GAP', '10'))
+MODEL_PATH = os.getenv('MODEL_PATH', '../model/retrained_asl_model.pt')
+CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.5'))
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
 
-class ASLAnalyzerApp:
-    def __init__(self):
-        self.current_file_path: Optional[str] = None
-        self.analysis_result: Optional[Dict[str, Any]] = None
-        
-        # Load configuration
-        self.config = self._load_config()
-        
-        # UI components
-        self.upload_area = None
-        self.progress_bar = None
-        self.result_card = None
-        self.status_label = None
-        
-    def _load_config(self) -> Dict[str, Any]:
-        """Load configuration from environment or defaults"""
-        config = {
-            'GEMINI_API_KEY': os.getenv('GEMINI_API_KEY', 'AIzaSyCb-XaqhT3v1He3cTRH0zn6QCZFwHBKRNs'),
-            'GEMINI_MODEL': os.getenv('GEMINI_MODEL', 'gemini-2.0-flash-exp'),
-            'MODEL_PATH': os.getenv('MODEL_PATH', 'model/retrained_asl_model.pt'),
-            'CONFIDENCE_THRESHOLD': float(os.getenv('CONFIDENCE_THRESHOLD', '0.5')),
-            'FRAME_GAP': int(os.getenv('FRAME_GAP', '10'))
-        }
-        
-        # Find model file
-        model_paths = [
-            config['MODEL_PATH'],
-            'model/retrained_asl_model.pt',
-            '../model/retrained_asl_model.pt',
-            './retrained_asl_model.pt',
-            'retrained_asl_model.pt'
-        ]
-        
-        for path in model_paths:
-            abs_path = os.path.abspath(path)
-            if os.path.exists(abs_path):
-                config['MODEL_PATH'] = abs_path
-                break
-        else:
-            config['MODEL_PATH'] = None
-            
-        return config
+# Global objects
+classifier = None
+sentence_predictor = None
+
+def init_models():
+    """Initialize the ASL classifier and sentence predictor"""
+    global classifier, sentence_predictor
     
-    def create_ui(self):
-        """Create the main user interface"""
-        # Custom CSS for beautiful styling
-        ui.add_head_html('''
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Playfair+Display:wght@400;700&display=swap');
+    try:
+        # Initialize classifier
+        classifier = ASLClassifier(model_path=MODEL_PATH)
+        print(f"✓ Classifier loaded: {classifier.model_path}")
         
-        :root {
-            --primary-color: #6366f1;
-            --secondary-color: #ec4899;
-            --accent-color: #10b981;
-            --background-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            --card-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-            --glass-effect: rgba(255, 255, 255, 0.1);
-        }
-        
-        body {
-            background: var(--background-gradient);
-            min-height: 100vh;
-            font-family: 'JetBrains Mono', monospace;
-        }
-        
-        .main-container {
-            backdrop-filter: blur(10px);
-            background: var(--glass-effect);
-            border-radius: 24px;
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            box-shadow: var(--card-shadow);
-        }
-        
-        .hero-title {
-            font-family: 'Playfair Display', serif;
-            background: linear-gradient(45deg, #6366f1, #ec4899);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            font-weight: 700;
-            text-align: center;
-            margin-bottom: 0.5rem;
-        }
-        
-        .subtitle {
-            color: rgba(255, 255, 255, 0.8);
-            text-align: center;
-            font-weight: 400;
-            margin-bottom: 2rem;
-        }
-        
-        .upload-zone {
-            border: 3px dashed rgba(255, 255, 255, 0.3);
-            border-radius: 16px;
-            background: rgba(255, 255, 255, 0.05);
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            padding: 3rem;
-            text-align: center;
-            cursor: pointer;
-            position: relative;
-        }
-        
-        .upload-zone:hover {
-            border-color: var(--primary-color);
-            background: rgba(99, 102, 241, 0.1);
-            transform: translateY(-2px);
-        }
-        
-        .upload-icon {
-            font-size: 4rem;
-            color: var(--primary-color);
-            margin-bottom: 1rem;
-        }
-        
-        .result-card {
-            background: rgba(255, 255, 255, 0.95);
-            border-radius: 16px;
-            box-shadow: var(--card-shadow);
-            padding: 2rem;
-            margin-top: 2rem;
-            color: #1f2937;
-        }
-        
-        .result-header {
-            font-family: 'Playfair Display', serif;
-            color: var(--primary-color);
-            font-weight: 700;
-            margin-bottom: 1rem;
-            font-size: 1.5rem;
-        }
-        
-        .sequence-display {
-            font-family: 'JetBrains Mono', monospace;
-            background: linear-gradient(45deg, #f3f4f6, #e5e7eb);
-            padding: 1rem;
-            border-radius: 8px;
-            font-weight: 600;
-            letter-spacing: 0.1em;
-            border-left: 4px solid var(--primary-color);
-        }
-        
-        .interpretation-display {
-            background: linear-gradient(45deg, #ecfdf5, #d1fae5);
-            padding: 1rem;
-            border-radius: 8px;
-            border-left: 4px solid var(--accent-color);
-            font-weight: 600;
-            margin-top: 1rem;
-        }
-        
-        .confidence-badge {
-            display: inline-block;
-            padding: 0.25rem 1rem;
-            border-radius: 9999px;
-            font-size: 0.875rem;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-        
-        .confidence-high { background: #10b981; color: white; }
-        .confidence-medium { background: #f59e0b; color: white; }
-        .confidence-low { background: #ef4444; color: white; }
-        
-        .progress-container {
-            margin: 2rem 0;
-        }
-        
-        .status-text {
-            color: rgba(255, 255, 255, 0.9);
-            text-align: center;
-            margin-top: 1rem;
-            font-weight: 500;
-        }
-        
-        .btn-primary {
-            background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
-            border: none;
-            padding: 0.75rem 2rem;
-            border-radius: 12px;
-            color: white;
-            font-weight: 600;
-            transition: all 0.3s ease;
-            cursor: pointer;
-        }
-        
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(99, 102, 241, 0.3);
-        }
-        
-        .error-message {
-            background: rgba(239, 68, 68, 0.1);
-            border: 1px solid rgba(239, 68, 68, 0.3);
-            color: #ef4444;
-            padding: 1rem;
-            border-radius: 8px;
-            margin-top: 1rem;
-        }
-        
-        .component-status {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            margin-bottom: 0.5rem;
-            color: rgba(255, 255, 255, 0.8);
-            font-size: 0.875rem;
-        }
-        
-        .status-indicator {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-        }
-        
-        .status-success { background: #10b981; }
-        .status-error { background: #ef4444; }
-        </style>
-        ''')
-        
-        # Main container
-        with ui.column().classes('w-full max-w-4xl mx-auto p-6'):
-            # Header
-            ui.html('<h1 class="hero-title text-5xl">ASL Video Analyzer</h1>', sanitize=False)
-            ui.html('<p class="subtitle text-lg">Advanced American Sign Language Recognition powered by AI</p>', sanitize=False)
-            
-            # System status
-            with ui.card().classes('main-container p-6 mb-6'):
-                ui.label('System Status').classes('text-white text-lg font-semibold mb-4')
-                
-                # Component status indicators
-                with ui.row().classes('gap-4'):
-                    with ui.column():
-                        status_html = self._get_status_html()
-                        ui.html(status_html, sanitize=False)
-            
-            # Main application area
-            with ui.card().classes('main-container p-8'):
-                # Upload area
-                self.upload_area = self._create_upload_area()
-                
-                # Progress bar (initially hidden)
-                with ui.column().classes('progress-container').style('display: none') as self.progress_container:
-                    ui.label('Processing video...').classes('text-white text-center font-semibold')
-                    self.progress_bar = ui.linear_progress(value=0).classes('w-full')
-                    self.status_label = ui.label('').classes('status-text')
-                
-                # Results area (initially hidden)
-                self.result_container = ui.column().classes('w-full').style('display: none')
-                
-    def _get_status_html(self) -> str:
-        """Generate system status HTML"""
-        components_status = "success" if COMPONENTS_AVAILABLE else "error"
-        components_text = "Available" if COMPONENTS_AVAILABLE else "Not Available"
-        
-        model_status = "success" if self.config.get('MODEL_PATH') and os.path.exists(self.config['MODEL_PATH']) else "error"
-        model_text = "Found" if model_status == "success" else "Not Found"
-        
-        return f'''
-        <div class="component-status">
-            <div class="status-indicator status-{components_status}"></div>
-            <span>ASL Components: {components_text}</span>
-        </div>
-        <div class="component-status">
-            <div class="status-indicator status-{model_status}"></div>
-            <span>AI Model: {model_text}</span>
-        </div>
-        <div class="component-status">
-            <div class="status-indicator status-success"></div>
-            <span>Gemini API: Configured</span>
-        </div>
-        '''
-    
-    def _create_upload_area(self):
-        """Create the file upload area"""
-        with ui.column().classes('w-full'):
-            # Upload zone with button
-            with ui.element('div').classes('upload-zone'):
-                ui.html('<div class="upload-icon">🎥</div>', sanitize=False)
-                ui.label('Upload your ASL video').classes('text-white text-xl font-semibold')
-                ui.label('Click the button below to browse files').classes('text-white/60 text-sm mt-2')
-                ui.label(f'Supported formats: {", ".join(ALLOWED_EXTENSIONS)}').classes('text-white/40 text-xs mt-2')
-                ui.label(f'Maximum size: {MAX_FILE_SIZE // (1024*1024)}MB').classes('text-white/40 text-xs')
-                
-                # Simple upload button - use a function wrapper to handle async
-                def handle_upload_sync(e):
-                    import asyncio
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # Create task if loop is running
-                        loop.create_task(self._handle_upload(e))
-                    else:
-                        # Run directly if no loop
-                        asyncio.run(self._handle_upload(e))
-                
-                upload = ui.upload(
-                    on_upload=handle_upload_sync,
-                    max_file_size=MAX_FILE_SIZE,
-                    multiple=False,
-                    auto_upload=True,
-                    label='Choose Video File'
-                ).props('accept="video/*"').classes('mt-4')
-            
-            return upload
-    
-    async def _handle_upload(self, e):
-        """Handle video file upload and processing"""
-        try:
-            print(f"Upload event received")
-            print(f"Event attributes: {[attr for attr in dir(e) if not attr.startswith('_')]}")
-            
-            # In NiceGUI, uploaded files are in e.file
-            filename = None
-            content = None
-            
-            if hasattr(e, 'file') and e.file:
-                # Get filename
-                if hasattr(e.file, 'name'):
-                    filename = e.file.name
-                elif hasattr(e.file, 'filename'):
-                    filename = e.file.filename
-                
-                # Get content - need to await the read() method
-                if hasattr(e.file, 'read'):
-                    content = await e.file.read()
-                elif hasattr(e.file, 'content'):
-                    content = e.file.content
-                    if hasattr(content, 'read'):
-                        content = await content.read()
-            
-            print(f"Final extracted - filename: {filename}, content size: {len(content) if content else 0}")
-            
-            # Default filename if none found
-            if not filename:
-                filename = "uploaded_video.mp4"
-            
-            if not content or len(content) == 0:
-                self._show_error("No file content received - please try uploading again")
-                return
-            
-            # Validate file
-            if not self._validate_file(filename, content):
-                return
-            
-            # Save uploaded file
-            file_path = await self._save_upload(filename, content)
-            self.current_file_path = file_path
-            
-            # Show progress and start analysis
-            self._show_progress()
-            await self._analyze_video(file_path)
-            
-        except Exception as error:
-            self._show_error(f"Upload failed: {str(error)}")
-            print(f"Upload error: {traceback.format_exc()}")
-    
-    def _validate_file(self, filename: str, content) -> bool:
-        """Validate uploaded file"""
-        try:
-            file_ext = Path(filename).suffix.lower()
-            
-            if file_ext not in ALLOWED_EXTENSIONS:
-                self._show_error(f"Invalid file type. Supported: {', '.join(ALLOWED_EXTENSIONS)}")
-                return False
-            
-            # Check file size
-            if isinstance(content, bytes):
-                file_size = len(content)
-            else:
-                self._show_error("Invalid file content type")
-                return False
-                
-            if file_size > MAX_FILE_SIZE:
-                self._show_error(f"File too large. Maximum size: {MAX_FILE_SIZE // (1024*1024)}MB")
-                return False
-                
-            return True
-            
-        except Exception as error:
-            self._show_error(f"File validation failed: {str(error)}")
-            return False
-    
-    async def _save_upload(self, filename: str, content) -> str:
-        """Save uploaded file and return path"""
-        try:
-            file_id = str(uuid.uuid4())
-            file_ext = Path(filename).suffix.lower()
-            if not file_ext:
-                file_ext = '.mp4'  # Default extension
-                
-            new_filename = f"{file_id}{file_ext}"
-            file_path = UPLOAD_DIR / new_filename
-            
-            with open(file_path, 'wb') as f:
-                if isinstance(content, bytes):
-                    f.write(content)
-                else:
-                    raise Exception("Content must be bytes")
-                
-            return str(file_path.absolute())
-            
-        except Exception as error:
-            raise Exception(f"Failed to save file: {str(error)}")
-    
-    def _show_progress(self):
-        """Show progress indicator"""
-        self.upload_area.style('display: none')
-        self.progress_container.style('display: block')
-        self.result_container.style('display: none')
-    
-    def _show_error(self, message: str):
-        """Show error message"""
-        with self.result_container:
-            self.result_container.clear()
-            with ui.card().classes('result-card'):
-                ui.html(f'<div class="error-message">❌ {message}</div>', sanitize=False)
-        
-        self.progress_container.style('display: none')
-        self.result_container.style('display: block')
-    
-    async def _analyze_video(self, video_path: str):
-        """Perform ASL video analysis"""
-        try:
-            if not COMPONENTS_AVAILABLE:
-                raise Exception("ASL analysis components not available")
-            
-            if not self.config['MODEL_PATH'] or not os.path.exists(self.config['MODEL_PATH']):
-                raise Exception("ASL model not found")
-            
-            # Update progress
-            self.progress_bar.value = 0.1
-            self.status_label.text = "Initializing analyzer..."
-            await asyncio.sleep(0.1)
-            
-            # Create analyzer
-            analyzer = ASLConsoleAnalyzer(
-                video_path=video_path,
-                frame_gap=self.config['FRAME_GAP'],
-                model_path=self.config['MODEL_PATH'],
-                gemini_api_key=self.config['GEMINI_API_KEY'],
-                gemini_model=self.config['GEMINI_MODEL'],
-                confidence_threshold=self.config['CONFIDENCE_THRESHOLD']
+        # Initialize sentence predictor with Gemini
+        if GEMINI_API_KEY:
+            sentence_predictor = SentencePredictor(
+                api_key=GEMINI_API_KEY,
+                model_name=GEMINI_MODEL
             )
-            
-            self.progress_bar.value = 0.3
-            self.status_label.text = "Processing video frames..."
-            await asyncio.sleep(0.1)
-            
-            # Run analysis in background
-            result = await self._run_analysis(analyzer)
-            
-            self.progress_bar.value = 1.0
-            self.status_label.text = "Analysis complete!"
-            await asyncio.sleep(0.5)
-            
-            # Show results
-            self._show_results(result)
-            
-        except Exception as error:
-            self._show_error(f"Analysis failed: {str(error)}")
-            print(f"Analysis error: {traceback.format_exc()}")
-        finally:
-            # Cleanup
-            if self.current_file_path and os.path.exists(self.current_file_path):
-                try:
-                    os.remove(self.current_file_path)
-                except:
-                    pass
-    
-    async def _run_analysis(self, analyzer) -> Dict[str, Any]:
-        """Run the actual video analysis"""
-        import io
-        import contextlib
-        
-        # Capture output from analyzer
-        captured_output = io.StringIO()
-        
-        # Update progress during analysis
-        async def update_progress():
-            for i in range(30, 90, 10):
-                await asyncio.sleep(0.5)
-                self.progress_bar.value = i / 100
-                if i == 40:
-                    self.status_label.text = "Detecting hand signs..."
-                elif i == 60:
-                    self.status_label.text = "Building sequence..."
-                elif i == 80:
-                    self.status_label.text = "Generating interpretation..."
-        
-        # Start progress updates
-        progress_task = asyncio.create_task(update_progress())
-        
-        try:
-            # Run analysis with captured output
-            with contextlib.redirect_stdout(captured_output):
-                analyzer.analyze_video()
-                
-            output_text = captured_output.getvalue()
-            
-            # Cancel progress updates
-            progress_task.cancel()
-            
-            # Parse output
-            return self._parse_analysis_output(output_text)
-            
-        except Exception as e:
-            progress_task.cancel()
-            raise e
-    
-    def _parse_analysis_output(self, output_text: str) -> Dict[str, Any]:
-        """Parse analyzer output into structured result"""
-        lines = output_text.strip().split('\n')
-        detected_sequence = ""
-        interpretation = ""
-        
-        for line in lines:
-            if line.startswith('DETECTED SEQUENCE:'):
-                detected_sequence = line.replace('DETECTED SEQUENCE:', '').strip()
-            elif line.startswith('INTERPRETATION:'):
-                interpretation = line.replace('INTERPRETATION:', '').strip()
-        
-        if not detected_sequence and not interpretation:
-            if "No signs detected" in output_text:
-                detected_sequence = "No signs detected"
-                interpretation = "No recognizable ASL signs found in the video"
-            else:
-                raise Exception("Failed to parse analysis output")
-        
-        # Determine confidence
-        confidence = "HIGH"
-        if detected_sequence == interpretation:
-            confidence = "HIGH"
-        elif "No signs" in detected_sequence or "No signs" in interpretation:
-            confidence = "LOW"
+            print(f"✓ Gemini predictor initialized: {sentence_predictor.model_name}")
         else:
-            confidence = "MEDIUM"
+            print("⚠ Warning: GEMINI_API_KEY not found. AI interpretation will be limited.")
+            sentence_predictor = None
+            
+    except Exception as e:
+        print(f"✗ Model initialization error: {e}")
+        raise
+
+def process_video(video_path: str, progress_callback=None):
+    """
+    Process video and extract ASL sequence with AI interpretation
+    
+    Args:
+        video_path: Path to the video file
+        progress_callback: Optional callback for progress updates
         
+    Returns:
+        dict: Results including sequence and interpretation
+    """
+    if not os.path.exists(video_path):
         return {
-            'detected_sequence': detected_sequence,
-            'interpretation': interpretation,
-            'confidence': confidence,
-            'raw_output': output_text
+            'error': f'Video file not found: {video_path}',
+            'sequence': '',
+            'interpretation': '',
+            'confidence': 'LOW'
         }
     
-    def _show_results(self, result: Dict[str, Any]):
-        """Display analysis results"""
-        self.progress_container.style('display: none')
+    # Open video
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return {
+            'error': f'Cannot open video: {video_path}',
+            'sequence': '',
+            'interpretation': '',
+            'confidence': 'LOW'
+        }
+    
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    predictions = {}
+    sequence = []
+    frame_count = 0
+    
+    # Process frames
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
         
-        with self.result_container:
-            self.result_container.clear()
+        # Process every Nth frame
+        if frame_count % FRAME_GAP == 0:
+            # Save frame temporarily
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                temp_path = tmp.name
+                cv2.imwrite(temp_path, frame)
             
-            with ui.card().classes('result-card'):
-                ui.html('<h2 class="result-header">🎯 Analysis Results</h2>', sanitize=False)
+            try:
+                # Get prediction
+                result = classifier.predict_single_image(temp_path, show=False, save=False)
+                
+                if result and result['top_confidence'] > CONFIDENCE_THRESHOLD:
+                    predictions[frame_count] = result
+                    
+                    # Add to sequence if different from last
+                    pred_letter = result['top_class']
+                    if not sequence or sequence[-1] != pred_letter:
+                        sequence.append(pred_letter)
+                        
+            except Exception as e:
+                print(f"Error processing frame {frame_count}: {e}")
+            finally:
+                # Clean up temp file
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            
+            # Progress callback
+            if progress_callback:
+                progress = (frame_count / total_frames) * 100
+                progress_callback(progress)
+        
+        frame_count += 1
+    
+    cap.release()
+    
+    # Build sequence string
+    sequence_str = " ".join(sequence)
+    
+    # Get AI interpretation
+    interpretation_result = None
+    if sentence_predictor and sequence_str:
+        try:
+            interpretation_result = sentence_predictor.predict_sentence(sequence_str)
+        except Exception as e:
+            print(f"Error getting interpretation: {e}")
+            interpretation_result = {
+                'interpretation': sequence_str,
+                'confidence': 'LOW',
+                'reasoning': f'Error: {str(e)}',
+                'alternatives': []
+            }
+    
+    # Return results
+    return {
+        'sequence': sequence_str,
+        'interpretation': interpretation_result['interpretation'] if interpretation_result else sequence_str,
+        'confidence': interpretation_result['confidence'] if interpretation_result else 'N/A',
+        'reasoning': interpretation_result.get('reasoning', '') if interpretation_result else '',
+        'alternatives': interpretation_result.get('alternatives', []) if interpretation_result else [],
+        'total_frames': total_frames,
+        'processed_frames': len(predictions),
+        'detected_signs': len(sequence)
+    }
+
+# ============================================================================
+# NiceGUI Web Interface
+# ============================================================================
+
+@ui.page('/')
+async def main_page():
+    """Main application page"""
+    
+    # State variables
+    results = {'data': None}
+    processing = {'active': False}
+    
+    # Header
+    with ui.header().classes('items-center justify-between'):
+        ui.label('🤟 ASL Video Analyzer').classes('text-2xl font-bold')
+        ui.label('Powered by YOLO + Gemini AI').classes('text-sm opacity-70')
+    
+    # Main container
+    with ui.column().classes('w-full max-w-4xl mx-auto p-6 gap-4'):
+        
+        # Upload section
+        with ui.card().classes('w-full p-6'):
+            ui.label('Upload ASL Video').classes('text-xl font-semibold mb-4')
+            
+            upload_container = ui.column().classes('w-full')
+            progress_bar = ui.linear_progress(value=0).classes('w-full')
+            progress_bar.visible = False
+            status_label = ui.label('').classes('mt-2')
+            status_label.visible = False
+            
+            async def handle_upload(e):
+                """Handle video upload and processing"""
+                if processing['active']:
+                    ui.notify('Already processing a video', type='warning')
+                    return
+                
+                print("\nUpload event received")
+                
+                try:
+                    # NiceGUI 3.2.0: e.file has async read() method
+                    content = await e.file.read()
+                    filename = e.file.name
+                    
+                    print(f"Final extracted - filename: {filename}, content size: {len(content) if content else 0}")
+                    
+                    if not content:
+                        ui.notify('No file content received', type='negative')
+                        return
+                    
+                    # Save uploaded file
+                    upload_dir = Path('./uploads')
+                    upload_dir.mkdir(exist_ok=True)
+                    video_path = upload_dir / (filename or 'uploaded_video.mp4')
+                    
+                    with open(video_path, 'wb') as f:
+                        f.write(content)
+                    
+                    ui.notify(f'Processing {filename}...', type='info')
+                    
+                    # Show progress
+                    processing['active'] = True
+                    progress_bar.visible = True
+                    status_label.visible = True
+                    status_label.set_text('Analyzing video frames...')
+                    
+                    def update_progress(percent):
+                        progress_bar.set_value(percent / 100)
+                        status_label.set_text(f'Processing: {percent:.1f}%')
+                    
+                    # Process video
+                    result = process_video(str(video_path), update_progress)
+                    
+                    # Update progress
+                    progress_bar.set_value(1.0)
+                    status_label.set_text('Processing complete!')
+                    
+                    # Store results
+                    results['data'] = result
+                    
+                    # Display results
+                    display_results(result)
+                    
+                    ui.notify('Analysis complete!', type='positive')
+                    
+                except Exception as e:
+                    ui.notify(f'Error: {str(e)}', type='negative')
+                    print(f"Upload error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                finally:
+                    processing['active'] = False
+                    progress_bar.visible = False
+            
+            # File uploader
+            with upload_container:
+                ui.upload(
+                    on_upload=handle_upload,
+                    max_files=1,
+                    auto_upload=True
+                ).props('accept=video/*').classes('w-full')
+        
+        # Results section
+        with ui.card().classes('w-full p-6') as results_card:
+            results_card.visible = False
+            results_container = ui.column().classes('w-full gap-4')
+        
+        def display_results(result):
+            """Display analysis results"""
+            results_card.visible = True
+            results_container.clear()
+            
+            with results_container:
+                # Title
+                ui.label('📊 Analysis Results').classes('text-xl font-semibold mb-2')
+                
+                # Error handling
+                if 'error' in result:
+                    ui.label(f'❌ Error: {result["error"]}').classes('text-red-600')
+                    return
                 
                 # Detected sequence
-                ui.label('Detected Letter Sequence:').classes('font-semibold text-gray-700 mb-2')
-                ui.html(f'<div class="sequence-display">{result["detected_sequence"]}</div>', sanitize=False)
+                with ui.card().classes('w-full bg-blue-50 p-4'):
+                    ui.label('🔤 Detected Letter Sequence:').classes('font-semibold mb-2')
+                    ui.label(result['sequence'] or 'No signs detected').classes('text-2xl font-mono')
                 
-                # Interpretation
-                ui.label('Interpretation:').classes('font-semibold text-gray-700 mb-2 mt-4')
-                ui.html(f'<div class="interpretation-display">{result["interpretation"]}</div>', sanitize=False)
-                
-                # Confidence
-                with ui.row().classes('mt-4 items-center gap-2'):
-                    ui.label('Confidence:').classes('font-semibold text-gray-700')
-                    confidence_class = f"confidence-{result['confidence'].lower()}"
-                    ui.html(f'<span class="confidence-badge {confidence_class}">{result["confidence"]}</span>', sanitize=False)
-                
-                # Action buttons
-                with ui.row().classes('mt-6 gap-4'):
-                    ui.button('Analyze Another Video', on_click=self._reset_app).classes('btn-primary')
+                # AI Interpretation (MAIN RESULT)
+                with ui.card().classes('w-full bg-green-50 p-4'):
+                    ui.label('🤖 AI Interpretation:').classes('font-semibold mb-2')
+                    ui.label(result['interpretation']).classes('text-3xl font-bold text-green-700')
                     
-                    if result['raw_output']:
-                        ui.button('View Details', on_click=lambda: self._show_details(result['raw_output'])).classes('btn-primary')
-        
-        self.result_container.style('display: block')
-    
-    def _reset_app(self):
-        """Reset application for new analysis"""
-        self.current_file_path = None
-        self.analysis_result = None
-        
-        self.upload_area.style('display: block')
-        self.progress_container.style('display: none')
-        self.result_container.style('display: none')
-        
-        ui.notify('Ready for new video analysis', type='positive')
-    
-    def _show_details(self, raw_output: str):
-        """Show detailed analysis output"""
-        with ui.dialog() as dialog, ui.card():
-            ui.label('Detailed Analysis Output').classes('text-lg font-bold mb-4')
-            with ui.scroll_area().classes('w-96 h-64'):
-                ui.code(raw_output).classes('text-xs')
-            
-            with ui.row().classes('mt-4'):
-                ui.button('Close', on_click=dialog.close)
-        
-        dialog.open()
+                    # Confidence and reasoning
+                    with ui.row().classes('gap-4 mt-2'):
+                        ui.label(f'Confidence: {result["confidence"]}').classes('text-sm font-semibold')
+                    
+                    if result.get('reasoning'):
+                        ui.label(f'Reasoning: {result["reasoning"]}').classes('text-sm mt-2 opacity-70')
+                
+                # Alternative interpretations
+                if result.get('alternatives'):
+                    with ui.card().classes('w-full bg-yellow-50 p-4'):
+                        ui.label('💡 Alternative Interpretations:').classes('font-semibold mb-2')
+                        for alt in result['alternatives']:
+                            ui.label(f'• {alt}').classes('text-sm')
+                
+                # Statistics
+                with ui.card().classes('w-full bg-gray-50 p-4'):
+                    ui.label('📈 Statistics:').classes('font-semibold mb-2')
+                    stats = f"""
+                    Total Frames: {result.get('total_frames', 'N/A')}
+                    Processed Frames: {result.get('processed_frames', 'N/A')}
+                    Detected Signs: {result.get('detected_signs', 'N/A')}
+                    Frame Gap: {FRAME_GAP}
+                    """
+                    ui.label(stats).classes('text-sm whitespace-pre-line')
 
-def main():
-    """Main application entry point"""
+# ============================================================================
+# Application Startup
+# ============================================================================
+
+if __name__ in {'__main__', '__mp_main__'}:
     print("🚀 Starting ASL Video Analyzer...")
     
-    # Create application instance
-    app_instance = ASLAnalyzerApp()
+    # Initialize models
+    init_models()
     
-    # Check system status
-    if not COMPONENTS_AVAILABLE:
-        print("⚠️  Warning: ASL components not found. Please ensure:")
-        print("   - signPredict.py is in src/ directory")
-        print("   - predictSentence.py is in src/ directory") 
-        print("   - asl_console_analyzer.py is in src/ directory")
-        print("   - Required dependencies are installed")
+    # Create uploads directory
+    Path('./uploads').mkdir(exist_ok=True)
     
-    if not app_instance.config['MODEL_PATH']:
-        print("⚠️  Warning: ASL model not found. Please ensure retrained_asl_model.pt is in model/ directory")
-    
-    # Set up NiceGUI app
-    ui.page_title = 'ASL Video Analyzer'
-    
-    # Create UI
-    app_instance.create_ui()
-    
-    # Run application
     print("🌟 Application ready! Open your browser to start analyzing ASL videos.")
+    
+    # Start NiceGUI
     ui.run(
         title='ASL Video Analyzer',
         port=8080,
-        show=True,
         reload=False,
-        dark=False
+        show=False
     )
-
-if __name__ == '__main__':
-    main()
