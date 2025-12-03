@@ -12,7 +12,6 @@ try:
     MODEL_AVAILABLE = True
 except ImportError:
     MODEL_AVAILABLE = False
-    print("❌ signPredict.py not found!")
     sys.exit(1)
 
 try:
@@ -20,7 +19,6 @@ try:
     LLM_AVAILABLE = True
 except ImportError:
     LLM_AVAILABLE = False
-    print("❌ predictSentence.py not found!")
 
 class ASLConsoleAnalyzer:
     def __init__(self, 
@@ -28,8 +26,8 @@ class ASLConsoleAnalyzer:
                  frame_gap=10,
                  model_path="../model/retrained_asl_model.pt",
                  gemini_api_key=None,
-                 confidence_threshold=0.5,
-                 progress_frequency=50):
+                 gemini_model=None,
+                 confidence_threshold=0.5):
         """
         Initialize the ASL analyzer
         
@@ -38,8 +36,8 @@ class ASLConsoleAnalyzer:
             frame_gap: Process every Nth frame
             model_path: Path to the ASL model
             gemini_api_key: API key for Gemini
+            gemini_model: Gemini model to use
             confidence_threshold: Minimum confidence for including predictions
-            progress_frequency: Show progress every N processed frames
         """
         # Convert paths to absolute paths relative to src directory
         src_dir = Path(__file__).parent.absolute()
@@ -58,8 +56,8 @@ class ASLConsoleAnalyzer:
             
         self.frame_gap = frame_gap
         self.gemini_api_key = gemini_api_key
+        self.gemini_model = gemini_model
         self.confidence_threshold = confidence_threshold
-        self.progress_frequency = progress_frequency
         
         self.classifier = None
         self.sentence_predictor = None
@@ -74,34 +72,27 @@ class ASLConsoleAnalyzer:
         """Initialize the sign language classifier"""
         if MODEL_AVAILABLE:
             try:
-                print("🔄 Loading ASL classification model...")
                 self.classifier = ASLClassifier(model_path=self.model_path)
-                print("✅ ASL model loaded successfully")
             except Exception as e:
-                print(f"❌ Model error: {str(e)}")
                 self.classifier = None
                 sys.exit(1)
         else:
-            print("❌ ASL classifier not available")
             sys.exit(1)
     
     def _init_llm(self):
         """Initialize the LLM sentence predictor"""
         if LLM_AVAILABLE:
             try:
-                print("🔄 Initializing LLM...")
                 if self.gemini_api_key:
-                    self.sentence_predictor = SentencePredictor(api_key=self.gemini_api_key)
+                    self.sentence_predictor = SentencePredictor(
+                        api_key=self.gemini_api_key,
+                        model_name=self.gemini_model
+                    )
                 else:
-                    self.sentence_predictor = SentencePredictor()
-                print("✅ LLM initialized successfully")
+                    self.sentence_predictor = SentencePredictor(model_name=self.gemini_model)
             except Exception as e:
-                print(f"⚠️  LLM initialization error: {e}")
-                print("📝 Will only show letter sequence without interpretation")
                 self.sentence_predictor = None
         else:
-            print("⚠️  LLM not available")
-            print("📝 Will only show letter sequence without interpretation")
             self.sentence_predictor = None
     
     def analyze_video(self):
@@ -110,34 +101,17 @@ class ASLConsoleAnalyzer:
         """
         # Check if video file exists
         if not os.path.exists(self.video_path):
-            print(f"❌ Video file not found: {self.video_path}")
-            print(f"📁 Current working directory: {os.getcwd()}")
-            print(f"📁 Looking for video at: {os.path.abspath(self.video_path)}")
+            print(f"Video file not found: {self.video_path}")
             sys.exit(1)
-        
-        print(f"🎬 Processing video: {os.path.basename(self.video_path)}")
-        print(f"📁 Full path: {self.video_path}")
-        print(f"⚙️  Frame gap: {self.frame_gap} (processing every {self.frame_gap} frames)")
-        print(f"🎯 Confidence threshold: {self.confidence_threshold}")
-        print()
         
         # Open video
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
-            print(f"❌ Cannot open video file: {self.video_path}")
+            print(f"Cannot open video file: {self.video_path}")
             sys.exit(1)
         
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        
-        print(f"📊 Video info: {total_frames} frames, {fps:.2f} FPS")
-        print(f"⏱️  Duration: {total_frames/fps:.2f} seconds")
-        print()
-        
         frame_count = 0
-        processed_count = 0
-        
-        print("🔄 Processing frames...")
         
         while True:
             ret, frame = cap.read()
@@ -154,24 +128,10 @@ class ASLConsoleAnalyzer:
                     pred_letter = prediction['prediction']
                     if not self.sequence or self.sequence[-1] != pred_letter:
                         self.sequence.append(pred_letter)
-                        print(f"Frame {frame_count:6d}: {pred_letter} ({prediction['confidence']:.1%})")
-                
-                processed_count += 1
-                
-                # Show progress
-                if processed_count % self.progress_frequency == 0:
-                    progress = (frame_count / total_frames) * 100
-                    print(f"📈 Progress: {progress:.1f}% ({processed_count} frames processed)")
             
             frame_count += 1
         
         cap.release()
-        
-        print()
-        print("✅ Video processing complete!")
-        print(f"📋 Processed {processed_count} frames out of {total_frames} total frames")
-        print(f"🔤 Detected {len(self.sequence)} unique signs")
-        print()
         
         # Display results
         self._display_results()
@@ -208,69 +168,27 @@ class ASLConsoleAnalyzer:
             }
             
         except Exception as e:
-            print(f"⚠️  Prediction error: {e}")
             return None
     
     def _display_results(self):
         """
         Display the final results
         """
-        print("=" * 70)
-        print("                        FINAL RESULTS")
-        print("=" * 70)
-        
         if not self.sequence:
-            print("❌ No signs detected in the video")
-            print(f"💡 Try lowering the confidence threshold (current: {self.confidence_threshold})")
-            print(f"💡 Or reducing the frame gap (current: {self.frame_gap})")
+            print("No signs detected in the video")
             return
         
         # Display detected sequence
         sequence_str = " ".join(self.sequence)
-        print(f"🔤 DETECTED LETTER SEQUENCE:")
-        print(f"   {sequence_str}")
-        print()
-        print(f"📊 Detection Statistics:")
-        print(f"   • Total unique letters: {len(self.sequence)}")
-        print(f"   • Total predicted frames: {len(self.predictions)}")
-        print(f"   • Average confidence: {sum(p['confidence'] for p in self.predictions.values()) / len(self.predictions):.1%}")
-        print()
+        print(f"DETECTED SEQUENCE: {sequence_str}")
         
         # Try to interpret with AI if available
         if self.sentence_predictor:
-            print("🤖 AI INTERPRETATION:")
-            print("🔄 Analyzing sequence with AI...")
-            
             try:
                 result = self.sentence_predictor.predict_sentence(sequence_str)
-                
-                print(f"📝 Original Sequence: {sequence_str}")
-                print(f"🎯 Interpretation: {result['interpretation']}")
-                print(f"📊 Confidence: {result['confidence']}")
-                print(f"💭 Reasoning: {result['reasoning']}")
-                
-                if result.get('alternatives'):
-                    print("🔄 Alternative Interpretations:")
-                    for i, alt in enumerate(result['alternatives'], 1):
-                        print(f"   {i}. {alt}")
+                print(f"INTERPRETATION: {result['interpretation']}")
                 
             except Exception as e:
-                print(f"❌ AI interpretation failed: {e}")
-                print("💡 Check your internet connection and API key")
+                print(f"INTERPRETATION: {sequence_str}")
         else:
-            print("⚠️  AI interpretation not available")
-            print("💡 Install google-generativeai and set GEMINI_API_KEY to enable AI interpretation")
-        
-        print()
-        print("=" * 70)
-        print("                     ANALYSIS COMPLETE")
-        print("=" * 70)
-        
-        # Show configuration summary
-        print()
-        print("📋 Configuration used:")
-        print(f"   • Video: {os.path.basename(self.video_path)}")
-        print(f"   • Frame gap: {self.frame_gap}")
-        print(f"   • Confidence threshold: {self.confidence_threshold}")
-        print(f"   • Model: {os.path.basename(self.model_path)}")
-        print(f"   • AI enabled: {'Yes' if self.sentence_predictor else 'No'}")
+            print(f"INTERPRETATION: {sequence_str}")

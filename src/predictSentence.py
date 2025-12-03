@@ -3,8 +3,6 @@ try:
     GENAI_AVAILABLE = True
 except ImportError as e:
     GENAI_AVAILABLE = False
-    print("⚠️ Warning: google-generativeai not installed!")
-    print("Install it with: pip install google-generativeai")
 
 from typing import Optional
 
@@ -13,12 +11,13 @@ class SentencePredictor:
     Predicts sentences from ASL alphabet sequences using Google Gemini
     """
     
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, model_name: str = None):
         """
         Initialize Gemini API
         
         Args:
             api_key: Google Gemini API key (if None, uses default)
+            model_name: Gemini model to use (if None, tries defaults)
         """
         if not GENAI_AVAILABLE:
             raise ImportError("google-generativeai package is not installed. Install with: pip install google-generativeai")
@@ -30,52 +29,35 @@ class SentencePredictor:
         self.api_key = api_key
         genai.configure(api_key=self.api_key)
         
-        # Try to find an available model
-        model_attempts = [
-            'models/gemini-2.0-flash-exp',
-            'models/gemini-1.5-flash',
-            'models/gemini-1.5-pro',
-            'models/gemini-pro'
-        ]
-        
-        print("🔍 Finding available Gemini model...")
+        # Use provided model or try defaults
+        if model_name:
+            model_attempts = [f'models/{model_name}']
+        else:
+            model_attempts = [
+                'models/gemini-2.0-flash-exp',
+                'models/gemini-1.5-flash',
+                'models/gemini-1.5-pro',
+                'models/gemini-pro'
+            ]
         
         self.model = None
         self.model_name = None
         
         for model_name in model_attempts:
             try:
-                print(f"   Trying: {model_name}...")
                 test_model = genai.GenerativeModel(model_name)
-                
-                # Test with a simple query
                 test_response = test_model.generate_content("Test")
-                
                 self.model = test_model
                 self.model_name = model_name
-                print(f"✅ Gemini API initialized successfully!")
-                print(f"✅ Using model: {model_name}")
                 break
-                
             except Exception as e:
                 error_msg = str(e)
                 if "API key" in error_msg.lower():
-                    print(f"   ❌ API key error: {error_msg[:60]}...")
                     break  # Don't try other models if API key is invalid
-                else:
-                    print(f"   ⚠️  Model unavailable: {error_msg[:60]}...")
                 continue
         
         if self.model is None:
-            raise Exception(
-                "❌ Could not initialize any Gemini model.\n"
-                "Possible issues:\n"
-                "1. Invalid API key\n"
-                "2. No internet connection\n" 
-                "3. Gemini service unavailable\n"
-                "4. Need to run: pip install --upgrade google-generativeai\n"
-                f"5. Current API key starts with: {self.api_key[:10]}..."
-            )
+            raise Exception("Could not initialize any Gemini model")
     
     def predict_sentence(self, alphabet_sequence: str) -> dict:
         """
@@ -110,8 +92,6 @@ class SentencePredictor:
         prompt = self._create_prompt(alphabet_sequence)
         
         try:
-            print(f"🤖 Calling Gemini API ({self.model_name})...")
-            
             response = self.model.generate_content(
                 prompt,
                 generation_config=genai.types.GenerationConfig(
@@ -120,12 +100,10 @@ class SentencePredictor:
                 )
             )
             
-            print(f"✅ Received response from Gemini")
             result = self._parse_response(response.text, alphabet_sequence)
             return result
             
         except Exception as e:
-            print(f"❌ Error calling Gemini API: {e}")
             return {
                 'interpretation': f"API Error",
                 'alternatives': [],
@@ -252,35 +230,6 @@ ALTERNATIVES: None
             result['reasoning'] = "Could not parse AI response"
         
         return result
-    
-    def format_result(self, result: dict) -> str:
-        """Format the result for display"""
-        output = f"""
-╔══════════════════════════════════════════════════════════╗
-║               ASL SEQUENCE INTERPRETATION                ║
-╚══════════════════════════════════════════════════════════╝
-
-Original Sequence: {result.get('original_sequence', 'N/A')}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🎯 PRIMARY INTERPRETATION:
-   {result.get('interpretation', 'N/A')}
-
-📊 CONFIDENCE: {result.get('confidence', 'N/A')}
-
-💡 REASONING:
-   {result.get('reasoning', 'N/A')}
-"""
-        
-        if result.get('alternatives'):
-            output += "\n🔄 ALTERNATIVE INTERPRETATIONS:\n"
-            for i, alt in enumerate(result['alternatives'], 1):
-                output += f"   {i}. {alt}\n"
-        
-        output += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        
-        return output
     
     def get_model_info(self):
         """Get information about the current model"""
