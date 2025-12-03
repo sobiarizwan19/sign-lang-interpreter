@@ -3,7 +3,7 @@
 import os
 import sys
 import tempfile
-import asyncio  # ADD THIS IMPORT
+import asyncio
 import cv2
 from pathlib import Path
 from nicegui import ui, app
@@ -162,67 +162,63 @@ def process_video(video_path: str, progress_callback=None):
     }
 
 # ============================================================================
-# Modern Sleek UI Design
+# Minimal Modern UI Design
 # ============================================================================
 
-# Custom CSS for modern design
+# Custom CSS for clean design
 modern_css = """
-/* Modern gradient background */
+/* Clean gradient background */
 body {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     min-height: 100vh;
     margin: 0;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-/* Card styling */
-.sleek-card {
-    background: rgba(255, 255, 255, 0.95);
-    backdrop-filter: blur(10px);
-    border-radius: 20px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
 /* Upload area styling */
 .upload-area {
-    border: 3px dashed rgba(102, 126, 234, 0.3);
+    border: 3px dashed rgba(255, 255, 255, 0.4);
     transition: all 0.3s ease;
     border-radius: 16px;
-    padding: 40px 20px;
-    background: rgba(255, 255, 255, 0.8);
+    padding: 60px 40px;
+    background: rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(10px);
+    cursor: pointer;
 }
 
 .upload-area:hover {
-    border-color: #667eea;
-    background: rgba(255, 255, 255, 0.9);
+    border-color: rgba(255, 255, 255, 0.7);
+    background: rgba(255, 255, 255, 0.15);
 }
 
 /* Progress bar styling */
 .progress-bar {
-    height: 8px;
-    border-radius: 4px;
+    height: 6px;
+    border-radius: 3px;
     overflow: hidden;
-    background: rgba(102, 126, 234, 0.1);
+    background: rgba(255, 255, 255, 0.2);
 }
 
 .progress-bar .q-linear-progress__track {
-    background: linear-gradient(90deg, #667eea, #764ba2) !important;
-    border-radius: 4px;
+    background: linear-gradient(90deg, #4ade80, #3b82f6) !important;
+    border-radius: 3px;
 }
 
-/* Result card styling */
-.result-card {
-    background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
-    border-left: 4px solid #667eea;
-    animation: fadeIn 0.6s ease-out;
+/* Output area styling */
+.output-area {
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(10px);
+    border-radius: 16px;
+    min-height: 120px;
+    padding: 30px;
+    animation: fadeIn 0.5s ease-out;
 }
 
 /* Animation */
 @keyframes fadeIn {
     from {
         opacity: 0;
-        transform: translateY(20px);
+        transform: translateY(10px);
     }
     to {
         opacity: 1;
@@ -230,209 +226,132 @@ body {
     }
 }
 
-/* Confidence indicator */
-.confidence-high { color: #10b981; }
-.confidence-medium { color: #f59e0b; }
-.confidence-low { color: #ef4444; }
-
 /* Typography */
-.display-text {
-    font-size: 2.5rem;
-    font-weight: 600;
-    line-height: 1.3;
+.ai-output-text {
+    font-size: 1.8rem;
+    font-weight: 500;
+    line-height: 1.4;
     color: #1f2937;
-}
-
-/* Upload button styling */
-.upload-button {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
-    color: white !important;
-    font-weight: 600;
-    padding: 12px 32px !important;
-    border-radius: 12px !important;
-    transition: all 0.3s ease !important;
-}
-
-.upload-button:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3) !important;
+    text-align: center;
+    margin: 0;
 }
 """
 
 @ui.page('/')
 async def main_page():
-    """Modern sleek main application page - Showing ONLY AI Interpretation"""
+    """Minimal page with only drop box and output"""
     
     # Inject custom CSS
     ui.add_head_html(f'<style>{modern_css}</style>')
     
     # State variables
-    results = {'data': None}
     processing = {'active': False}
     
-    # Main container with gradient background
-    with ui.column().classes('w-full min-h-screen items-center justify-center p-4 md:p-8'):
+    # Main container
+    with ui.column().classes('w-full min-h-screen items-center justify-center p-4 md:p-8 gap-8'):
         
-        # Title section
-        with ui.column().classes('w-full max-w-4xl items-center text-center mb-8 md:mb-12'):
-            ui.label('🤟 ASL Video Analyzer').classes('text-4xl md:text-5xl font-bold text-white mb-2')
-            ui.label('Powered by YOLO + Gemini AI').classes('text-lg md:text-xl text-white/80')
+        # Drop Box Area
+        with ui.column().classes('w-full max-w-2xl items-center gap-4'):
+            # Progress indicator (hidden by default)
+            progress_container = ui.column().classes('w-full items-center gap-3')
+            with progress_container:
+                progress_bar = ui.linear_progress(value=0).classes('progress-bar w-full')
+                progress_bar.visible = False
+                status_label = ui.label('').classes('text-white/80 text-sm')
+                status_label.visible = False
+            
+            # File upload area - Drop Box
+            ui.upload(
+                on_upload=lambda e: handle_upload(e, progress_bar, status_label),
+                max_files=1,
+                auto_upload=True
+            ).props('''
+                accept="video/*"
+                label="📁 Drop ASL video here or click to browse"
+                color="white"
+                text-color="white"
+            ''').classes('upload-area w-full').style('width: 100%')
         
-        # Main content area
-        with ui.column().classes('w-full max-w-4xl gap-6 md:gap-8'):
+        # Output Area (hidden initially)
+        output_area = ui.column().classes('output-area w-full max-w-3xl')
+        output_area.visible = False
+        
+        # Initialize output container
+        with output_area:
+            output_container = ui.column().classes('w-full items-center justify-center')
+        
+        async def handle_upload(e, progress_bar, status_label):
+            """Handle video upload and processing"""
+            if processing['active']:
+                return
             
-            # Upload card
-            with ui.card().classes('sleek-card w-full p-6 md:p-8'):
-                ui.label('Upload ASL Video').classes('text-2xl font-bold text-gray-800 mb-6 text-center')
+            try:
+                # NiceGUI 3.2.0: e.file has async read() method
+                content = await e.file.read()
+                filename = e.file.name
                 
-                # Upload container
-                upload_container = ui.column().classes('w-full items-center')
-                
-                # Progress indicator (hidden by default)
-                progress_container = ui.column().classes('w-full items-center gap-4')
-                with progress_container:
-                    progress_bar = ui.linear_progress(value=0).classes('progress-bar w-full max-w-md')
-                    progress_bar.visible = False
-                    status_label = ui.label('').classes('text-gray-600 font-medium')
-                    status_label.visible = False
-                
-                # File upload area
-                with upload_container:
-                    ui.upload(
-                        on_upload=lambda e: handle_upload(e, progress_bar, status_label, results),
-                        max_files=1,
-                        auto_upload=True
-                    ).props('''
-                        accept="video/*"
-                        label="📁 Drop ASL video here or click to browse"
-                        color="primary"
-                    ''').classes('upload-area w-full max-w-md').style('width: 100%')
-                
-                # Upload instructions
-                ui.label('Supported formats: MP4, AVI, MOV, WebM').classes('text-sm text-gray-500 mt-4 text-center')
-            
-            # Results card (hidden initially)
-            results_card = ui.card().classes('result-card w-full p-6 md:p-8')
-            results_card.visible = False
-            
-            # Initialize results container
-            with results_card:
-                results_container = ui.column().classes('w-full items-center gap-6')
-            
-            async def handle_upload(e, progress_bar, status_label, results):
-                """Handle video upload and processing"""
-                if processing['active']:
-                    ui.notify('Already processing a video', type='warning')
+                if not content:
                     return
                 
-                print("\nUpload event received")
+                # Save uploaded file
+                upload_dir = Path('./uploads')
+                upload_dir.mkdir(exist_ok=True)
+                video_path = upload_dir / (filename or 'uploaded_video.mp4')
                 
-                try:
-                    # NiceGUI 3.2.0: e.file has async read() method
-                    content = await e.file.read()
-                    filename = e.file.name
-                    
-                    print(f"Final extracted - filename: {filename}, content size: {len(content) if content else 0}")
-                    
-                    if not content:
-                        ui.notify('No file content received', type='negative')
-                        return
-                    
-                    # Save uploaded file
-                    upload_dir = Path('./uploads')
-                    upload_dir.mkdir(exist_ok=True)
-                    video_path = upload_dir / (filename or 'uploaded_video.mp4')
-                    
-                    with open(video_path, 'wb') as f:
-                        f.write(content)
-                    
-                    ui.notify(f'📤 Uploaded: {filename}', type='positive', position='top')
-                    
-                    # Show progress
-                    processing['active'] = True
-                    progress_bar.visible = True
-                    status_label.visible = True
-                    status_label.set_text('Analyzing video frames...')
-                    
-                    def update_progress(percent):
-                        progress_bar.set_value(percent / 100)
-                        status_label.set_text(f'Processing: {percent:.1f}%')
-                    
-                    # Process video
-                    result = process_video(str(video_path), update_progress)
-                    
-                    # Complete progress
-                    progress_bar.set_value(1.0)
-                    status_label.set_text('Processing complete!')
-                    
-                    # Store results
-                    results['data'] = result
-                    
-                    # Hide progress after delay
-                    async def hide_progress():
-                        await asyncio.sleep(1)
-                        progress_bar.visible = False
-                        status_label.visible = False
-                    
-                    # Display results
-                    display_results(result, results_container, results_card)
-                    
-                    ui.notify('✅ Analysis complete!', type='positive', position='top')
-                    
-                    # Reset progress
-                    await hide_progress()
-                    
-                except Exception as e:
-                    ui.notify(f'❌ Error: {str(e)}', type='negative')
-                    print(f"Upload error: {e}")
-                    import traceback
-                    traceback.print_exc()
-                finally:
+                with open(video_path, 'wb') as f:
+                    f.write(content)
+                
+                # Show progress
+                processing['active'] = True
+                progress_bar.visible = True
+                status_label.visible = True
+                status_label.set_text('Analyzing video...')
+                
+                def update_progress(percent):
+                    progress_bar.set_value(percent / 100)
+                    status_label.set_text(f'Processing: {percent:.0f}%')
+                
+                # Process video
+                result = process_video(str(video_path), update_progress)
+                
+                # Complete progress
+                progress_bar.set_value(1.0)
+                status_label.set_text('Complete!')
+                
+                # Show output area
+                display_output(result, output_container, output_area)
+                
+                # Hide progress after delay
+                async def hide_progress():
+                    await asyncio.sleep(0.5)
+                    progress_bar.visible = False
+                    status_label.visible = False
                     processing['active'] = False
-            
-            def display_results(result, container, card):
-                """Display ONLY AI interpretation results"""
-                card.visible = True
-                container.clear()
                 
-                with container:
-                    # Error handling
-                    if 'error' in result:
-                        with ui.column().classes('items-center gap-4'):
-                            ui.icon('error', size='xl', color='red').classes('text-red-500')
-                            ui.label(f'Error: {result["error"]}').classes('text-lg font-medium text-red-600 text-center')
-                        return
-                    
-                    # Main AI Interpretation (ONLY SHOWING THIS)
-                    with ui.column().classes('items-center gap-6 w-full'):
-                        # Title
-                        ui.label('🤖 AI Interpretation').classes('text-2xl font-bold text-gray-800')
-                        
-                        # Interpretation text in beautiful display
-                        interpretation_text = result.get('interpretation', 'No interpretation available')
-                        
-                        with ui.card().classes('bg-gradient-to-r from-blue-50 to-purple-50 p-8 rounded-2xl w-full max-w-2xl border-0'):
-                            ui.label(interpretation_text).classes('display-text text-center text-gray-800')
-                        
-                        # Confidence indicator (minimal)
-                        confidence = result.get('confidence', 'N/A')
-                        confidence_class = ''
-                        if 'HIGH' in str(confidence).upper():
-                            confidence_class = 'confidence-high'
-                        elif 'MEDIUM' in str(confidence).upper():
-                            confidence_class = 'confidence-medium'
-                        elif 'LOW' in str(confidence).upper():
-                            confidence_class = 'confidence-low'
-                        
-                        if confidence != 'N/A':
-                            with ui.row().classes('items-center gap-2'):
-                                ui.icon('insights', color='primary')
-                                ui.label(f'Confidence: {confidence}').classes(f'text-sm font-semibold {confidence_class}')
-                        
-                        # Processing complete indicator
-                        with ui.row().classes('items-center gap-2 mt-4'):
-                            ui.icon('check_circle', color='green', size='sm')
-                            ui.label('Analysis complete').classes('text-sm text-gray-500')
+                await hide_progress()
+                
+            except Exception as e:
+                print(f"Upload error: {e}")
+                import traceback
+                traceback.print_exc()
+                processing['active'] = False
+                progress_bar.visible = False
+                status_label.visible = False
+        
+        def display_output(result, container, area):
+            """Display only the AI interpretation"""
+            area.visible = True
+            container.clear()
+            
+            with container:
+                # Error handling
+                if 'error' in result:
+                    ui.label(f'Error: {result["error"]}').classes('text-red-500 text-center')
+                    return
+                
+                # Display AI interpretation
+                interpretation_text = result.get('interpretation', 'No interpretation available')
+                ui.label(interpretation_text).classes('ai-output-text')
 
 # ============================================================================
 # Application Startup
