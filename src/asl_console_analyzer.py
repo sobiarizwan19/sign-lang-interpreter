@@ -6,19 +6,27 @@ import tempfile
 import sys
 from pathlib import Path
 
-# Import the required modules
+# Import the required modules - adjusted for Flask context
 try:
-    from src.signPredict import ASLClassifier
+    from signPredict import ASLClassifier
     MODEL_AVAILABLE = True
 except ImportError:
-    MODEL_AVAILABLE = False
-    sys.exit(1)
+    try:
+        from src.signPredict import ASLClassifier
+        MODEL_AVAILABLE = True
+    except ImportError:
+        MODEL_AVAILABLE = False
+        sys.exit(1)
 
 try:
-    from src.predictSentence import SentencePredictor
+    from predictSentence import SentencePredictor
     LLM_AVAILABLE = True
 except ImportError:
-    LLM_AVAILABLE = False
+    try:
+        from src.predictSentence import SentencePredictor
+        LLM_AVAILABLE = True
+    except ImportError:
+        LLM_AVAILABLE = False
 
 class ASLConsoleAnalyzer:
     def __init__(self, 
@@ -39,18 +47,18 @@ class ASLConsoleAnalyzer:
             gemini_model: Gemini model to use
             confidence_threshold: Minimum confidence for including predictions
         """
-        # Convert paths to absolute paths relative to src directory
-        src_dir = Path(__file__).parent.absolute()
+        # Convert paths to absolute paths relative to current directory (not src)
+        current_dir = Path(__file__).parent.absolute()
         
         # Handle video path
         if not os.path.isabs(video_path):
-            self.video_path = str(src_dir / video_path)
+            self.video_path = str(current_dir / video_path)
         else:
             self.video_path = video_path
         
         # Handle model path
         if not os.path.isabs(model_path):
-            self.model_path = str(src_dir / model_path)
+            self.model_path = str(current_dir / model_path)
         else:
             self.model_path = model_path
             
@@ -75,9 +83,9 @@ class ASLConsoleAnalyzer:
                 self.classifier = ASLClassifier(model_path=self.model_path)
             except Exception as e:
                 self.classifier = None
-                sys.exit(1)
+                raise Exception(f"Failed to initialize classifier: {e}")
         else:
-            sys.exit(1)
+            raise Exception("ASL classifier not available")
     
     def _init_llm(self):
         """Initialize the LLM sentence predictor"""
@@ -102,13 +110,13 @@ class ASLConsoleAnalyzer:
         # Check if video file exists
         if not os.path.exists(self.video_path):
             print(f"Video file not found: {self.video_path}")
-            sys.exit(1)
+            return
         
         # Open video
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
             print(f"Cannot open video file: {self.video_path}")
-            sys.exit(1)
+            return
         
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         frame_count = 0

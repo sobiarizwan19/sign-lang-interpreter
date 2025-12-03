@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ASL Video Interpreter</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0a0b;
+            --bg-secondary: #1a1a1c;
+            --bg-tertiary: #2a2a2e;
+            --text-primary: #ffffff;
+            --text-secondary: #b3b3b3;
+            --text-muted: #666666;
+            --accent-primary: #00d4aa;
+            --accent-secondary: #0099cc;
+            --error: #ff4757;
+            --warning: #ffa726;
+            --success: #4caf50;
+            --border: #333333;
+            --border-hover: #555555;
+            --glass-bg: rgba(255, 255, 255, 0.05);
+            --glass-border: rgba(255, 255, 255, 0.1);
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+        
+        /* Animated background */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: 
+                radial-gradient(circle at 20% 80%, rgba(0, 212, 170, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 80% 20%, rgba(0, 153, 204, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 40% 40%, rgba(255, 167, 38, 0.05) 0%, transparent 50%);
+            z-index: -1;
+            animation: backgroundShift 20s ease-in-out infinite;
+        }
+        
+        @keyframes backgroundShift {
+            0%, 100% { transform: rotate(0deg) scale(1); }
+            50% { transform: rotate(2deg) scale(1.05); }
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 3rem;
+            opacity: 0;
+            animation: fadeInUp 1s ease-out 0.2s forwards;
+        }
+        
+        .header h1 {
+            font-size: 3rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 0.5rem;
+            letter-spacing: -0.02em;
+        }
+        
+        .header p {
+            font-size: 1.125rem;
+            color: var(--text-secondary);
+            font-weight: 400;
+            line-height: 1.6;
+        }
+        
+        .upload-area {
+            background: var(--glass-bg);
+            backdrop-filter: blur(20px);
+            border: 2px dashed var(--border);
+            border-radius: 16px;
+            padding: 3rem;
+            text-align: center;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+            opacity: 0;
+            animation: fadeInUp 1s ease-out 0.4s forwards;
+            min-height: 300px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .upload-area:hover {
+            border-color: var(--accent-primary);
+            background: rgba(0, 212, 170, 0.05);
+            transform: translateY(-2px);
+        }
+        
+        .upload-area.dragover {
+            border-color: var(--accent-primary);
+            background: rgba(0, 212, 170, 0.1);
+            transform: scale(1.02);
+        }
+        
+        .upload-icon {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 1.5rem;
+            opacity: 0.6;
+            transition: all 0.3s ease;
+        }
+        
+        .upload-area:hover .upload-icon {
+            opacity: 1;
+            transform: scale(1.1);
+        }
+        
+        .upload-text {
+            font-size: 1.25rem;
+            font-weight: 500;
+            color: var(--text-primary);
+            margin-bottom: 0.5rem;
+        }
+        
+        .upload-subtext {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .file-input {
+            display: none;
+        }
+        
+        .upload-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1.5rem;
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.95rem;
+        }
+        
+        .upload-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 32px rgba(0, 212, 170, 0.3);
+        }
+        
+        .loading {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            gap: 1rem;
+            margin-top: 2rem;
+            opacity: 0;
+            animation: fadeInUp 0.5s ease-out forwards;
+        }
+        
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border);
+            border-top: 3px solid var(--accent-primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .result {
+            display: none;
+            margin-top: 2rem;
+            padding: 2rem;
+            background: var(--glass-bg);
+            backdrop-filter: blur(20px);
+            border-radius: 16px;
+            border: 1px solid var(--glass-border);
+            opacity: 0;
+            animation: fadeInUp 0.8s ease-out forwards;
+        }
+        
+        .result-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--accent-primary);
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .result-content {
+            display: grid;
+            gap: 1.5rem;
+        }
+        
+        .result-item {
+            background: var(--bg-secondary);
+            padding: 1.5rem;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }
+        
+        .result-item h3 {
+            font-size: 0.95rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .result-item p {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.25rem;
+            font-weight: 500;
+            color: var(--text-primary);
+            word-break: break-word;
+        }
+        
+        .interpretation {
+            background: linear-gradient(135deg, rgba(0, 212, 170, 0.1), rgba(0, 153, 204, 0.1));
+            border-color: var(--accent-primary);
+        }
+        
+        .error {
+            display: none;
+            margin-top: 2rem;
+            padding: 1.5rem;
+            background: rgba(255, 71, 87, 0.1);
+            border: 1px solid var(--error);
+            border-radius: 12px;
+            color: var(--error);
+            opacity: 0;
+            animation: fadeInUp 0.5s ease-out forwards;
+        }
+        
+        .reset-btn {
+            margin-top: 2rem;
+            padding: 0.75rem 1.5rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 500;
+        }
+        
+        .reset-btn:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--border-hover);
+            transform: translateY(-1px);
+        }
+        
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .file-preview {
+            display: none;
+            margin-top: 1rem;
+            padding: 1rem;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+        
+        .file-info {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+            
+            .header h1 {
+                font-size: 2.5rem;
+            }
+            
+            .upload-area {
+                padding: 2rem 1rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>ASL Video Interpreter</h1>
+            <p>Upload a video to analyze American Sign Language fingerspelling and get real-time interpretation</p>
+        </div>
+        
+        <div class="upload-area" id="uploadArea">
+            <svg class="upload-icon" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M14,2H6A2,2 0 0,0 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2M18,20H6V4H13V9H18V20Z" />
+            </svg>
+            <div class="upload-text">Drop your video here</div>
+            <div class="upload-subtext">Supports MP4, AVI, MOV, MKV, WEBM (max 50MB)</div>
+            <button class="upload-btn" id="selectBtn">
+                <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/>
+                </svg>
+                Select Video File
+            </button>
+            <input type="file" id="fileInput" class="file-input" accept=".mp4,.avi,.mov,.mkv,.webm">
+            
+            <div class="file-preview" id="filePreview">
+                <div class="file-info">
+                    <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M14,2H6A2,2 0 0,0 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2M18,20H6V4H13V9H18V20Z" />
+                    </svg>
+                    <span id="fileName"></span>
+                    <span id="fileSize"></span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>Analyzing video... This may take a few moments</p>
+        </div>
+        
+        <div class="result" id="result">
+            <div class="result-title">
+                <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                </svg>
+                Analysis Complete
+            </div>
+            <div class="result-content">
+                <div class="result-item">
+                    <h3>Detected Sequence</h3>
+                    <p id="detectedSequence"></p>
+                </div>
+                <div class="result-item interpretation">
+                    <h3>Interpretation</h3>
+                    <p id="interpretation"></p>
+                </div>
+            </div>
+            <button class="reset-btn" id="resetBtn">Analyze Another Video</button>
+        </div>
+        
+        <div class="error" id="error">
+            <strong>Error:</strong> <span id="errorMessage"></span>
+        </div>
+    </div>
+
+    <script>
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const selectBtn = document.getElementById('selectBtn');
+        const loading = document.getElementById('loading');
+        const result = document.getElementById('result');
+        const error = document.getElementById('error');
+        const filePreview = document.getElementById('filePreview');
+        const fileName = document.getElementById('fileName');
+        const fileSize = document.getElementById('fileSize');
+        const resetBtn = document.getElementById('resetBtn');
+
+        // File selection handlers
+        selectBtn.addEventListener('click', () => fileInput.click());
+        
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                showFilePreview(file);
+                uploadFile(file);
+            }
+        });
+
+        // Drag and drop handlers
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                const file = files[0];
+                showFilePreview(file);
+                uploadFile(file);
+            }
+        });
+
+        function showFilePreview(file) {
+            fileName.textContent = file.name;
+            fileSize.textContent = `(${(file.size / 1024 / 1024).toFixed(1)} MB)`;
+            filePreview.style.display = 'block';
+        }
+
+        function hideAllStates() {
+            loading.style.display = 'none';
+            result.style.display = 'none';
+            error.style.display = 'none';
+            filePreview.style.display = 'none';
+        }
+
+        function uploadFile(file) {
+            hideAllStates();
+            loading.style.display = 'flex';
+
+            const formData = new FormData();
+            formData.append('video', file);
+
+            fetch('http://localhost:5000/api/analyze', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                loading.style.display = 'none';
+                
+                if (data.success) {
+                    document.getElementById('detectedSequence').textContent = data.detected_sequence;
+                    document.getElementById('interpretation').textContent = data.interpretation;
+                    result.style.display = 'block';
+                } else {
+                    document.getElementById('errorMessage').textContent = data.error;
+                    error.style.display = 'block';
+                }
+            })
+            .catch(err => {
+                loading.style.display = 'none';
+                document.getElementById('errorMessage').textContent = 'Network error. Please try again.';
+                error.style.display = 'block';
+            });
+        }
+
+        resetBtn.addEventListener('click', () => {
+            hideAllStates();
+            fileInput.value = '';
+            uploadArea.classList.remove('dragover');
+        });
+
+        // Health check on page load
+        fetch('http://localhost:5000/api/health')
+            .then(response => response.json())
+            .then(data => {
+                if (!data.components_available) {
+                    document.getElementById('errorMessage').textContent = 'ASL analysis components not available. Please check server configuration.';
+                    error.style.display = 'block';
+                }
+            })
+            .catch(err => {
+                console.warn('Health check failed:', err);
+            });
+    </script>
+</body>
+</html>

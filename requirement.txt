@@ -19,3 +19,7 @@ python-dotenv>=1.0.0  # Alternative env loading (optional)
 # Development dependencies (optional)
 pytest>=7.0.0
 black>=23.0.0
+
+# Backend
+flask>=2.2.2
+flask_cors>=3.0.10
