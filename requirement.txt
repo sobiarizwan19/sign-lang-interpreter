@@ -1,25 +1,19 @@
-# ASL Video Analyzer Dependencies
-# ===============================
+# Core NiceGUI Application Dependencies
+nicegui==3.2.0
 
-# Core dependencies
+# Computer Vision and AI Dependencies
 opencv-python>=4.8.0
 ultralytics>=8.0.0
-Pillow>=9.5.0
-numpy>=1.21.0
+Pillow>=10.0.0
 
-# AI/ML dependencies
+# Google Generative AI for sentence prediction
 google-generativeai>=0.3.0
+
+# Additional utilities
+pathlib2>=2.3.0
+numpy>=1.24.0
 torch>=2.0.0
 torchvision>=0.15.0
 
-# Optional dependencies
-pathlib2>=2.3.0  # For older Python versions
-python-dotenv>=1.0.0  # Alternative env loading (optional)
-
-# Development dependencies (optional)
-pytest>=7.0.0
-black>=23.0.0
-
-# Backend
-flask>=2.2.2
-flask_cors>=3.0.10
+# Optional: For better video codec support
+imageio-ffmpeg>=0.4.0
