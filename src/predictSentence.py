@@ -13,25 +13,29 @@ class SentencePredictor:
     Predicts sentences from ASL alphabet sequences using Google Gemini
     """
     
-    def __init__(self, api_key: str = "AIzaSyCb-XaqhT3v1He3cTRH0zn6QCZFwHBKRNs"):
+    def __init__(self, api_key: str = None):
         """
         Initialize Gemini API
         
         Args:
-            api_key: Google Gemini API key
+            api_key: Google Gemini API key (if None, uses default)
         """
         if not GENAI_AVAILABLE:
             raise ImportError("google-generativeai package is not installed. Install with: pip install google-generativeai")
         
+        # Use provided API key or default
+        if api_key is None:
+            api_key = "AIzaSyCb-XaqhT3v1He3cTRH0zn6QCZFwHBKRNs"
+        
         self.api_key = api_key
         genai.configure(api_key=self.api_key)
         
-        # Use the models that are available
+        # Try to find an available model
         model_attempts = [
-            'models/gemini-2.0-flash',
-            'models/gemini-flash-latest',
-            'models/gemini-2.5-flash',
-            'models/gemini-2.0-flash-lite',
+            'models/gemini-2.0-flash-exp',
+            'models/gemini-1.5-flash',
+            'models/gemini-1.5-pro',
+            'models/gemini-pro'
         ]
         
         print("🔍 Finding available Gemini model...")
@@ -43,25 +47,34 @@ class SentencePredictor:
             try:
                 print(f"   Trying: {model_name}...")
                 test_model = genai.GenerativeModel(model_name)
-                test_response = test_model.generate_content("Hi")
+                
+                # Test with a simple query
+                test_response = test_model.generate_content("Test")
                 
                 self.model = test_model
                 self.model_name = model_name
-                print(f"✓ Gemini API initialized successfully!")
-                print(f"✓ Using model: {model_name}")
+                print(f"✅ Gemini API initialized successfully!")
+                print(f"✅ Using model: {model_name}")
                 break
                 
             except Exception as e:
-                print(f"   ✗ Failed: {str(e)[:80]}...")
+                error_msg = str(e)
+                if "API key" in error_msg.lower():
+                    print(f"   ❌ API key error: {error_msg[:60]}...")
+                    break  # Don't try other models if API key is invalid
+                else:
+                    print(f"   ⚠️  Model unavailable: {error_msg[:60]}...")
                 continue
         
         if self.model is None:
             raise Exception(
-                "❌ Could not initialize Gemini model.\n"
-                "Please check:\n"
-                "1. Your API key is valid\n"
-                "2. You have internet connection\n"
-                "3. Run: pip install --upgrade google-generativeai"
+                "❌ Could not initialize any Gemini model.\n"
+                "Possible issues:\n"
+                "1. Invalid API key\n"
+                "2. No internet connection\n" 
+                "3. Gemini service unavailable\n"
+                "4. Need to run: pip install --upgrade google-generativeai\n"
+                f"5. Current API key starts with: {self.api_key[:10]}..."
             )
     
     def predict_sentence(self, alphabet_sequence: str) -> dict:
@@ -88,7 +101,7 @@ class SentencePredictor:
             return {
                 'interpretation': "Model not initialized",
                 'alternatives': [],
-                'confidence': "LOW",
+                'confidence': "LOW", 
                 'raw_response': "",
                 'reasoning': "Gemini model failed to initialize",
                 'original_sequence': alphabet_sequence
@@ -97,7 +110,7 @@ class SentencePredictor:
         prompt = self._create_prompt(alphabet_sequence)
         
         try:
-            print(f"🤖 Calling Gemini API with model: {self.model_name}")
+            print(f"🤖 Calling Gemini API ({self.model_name})...")
             
             response = self.model.generate_content(
                 prompt,
@@ -107,18 +120,18 @@ class SentencePredictor:
                 )
             )
             
-            print(f"✓ Got response from Gemini")
+            print(f"✅ Received response from Gemini")
             result = self._parse_response(response.text, alphabet_sequence)
             return result
             
         except Exception as e:
             print(f"❌ Error calling Gemini API: {e}")
             return {
-                'interpretation': f"Error: Could not get response",
+                'interpretation': f"API Error",
                 'alternatives': [],
                 'confidence': "LOW",
                 'raw_response': "",
-                'reasoning': f"API Error: {str(e)}",
+                'reasoning': f"API call failed: {str(e)[:100]}...",
                 'original_sequence': alphabet_sequence
             }
     
@@ -136,12 +149,12 @@ Interpret what word or sentence is being spelled. Consider the following:
 2. **Potential Errors**: The detection system may have:
    - Missed some letters
    - Detected duplicate letters when the hand was held still
-   - Misidentified similar-looking signs (e.g., M/N, A/S)
+   - Misidentified similar-looking signs (e.g., M/N, A/S, R/U)
 3. **Context**: Consider common English words and phrases
 4. **Multiple Interpretations**: If the sequence is ambiguous, provide alternative interpretations
 
 **Response Format:**
-Provide your response in the following structure:
+Provide your response in exactly this structure:
 
 PRIMARY INTERPRETATION: [Your best guess at the intended word/sentence]
 
@@ -149,7 +162,7 @@ CONFIDENCE: [HIGH/MEDIUM/LOW]
 
 REASONING: [Brief explanation of why you chose this interpretation]
 
-ALTERNATIVES: [List 2-3 alternative interpretations if applicable, or write "None"]
+ALTERNATIVES: [List 2-3 alternative interpretations, or write "None"]
 
 **Example Response:**
 
@@ -201,27 +214,42 @@ ALTERNATIVES: None
             elif 'ALTERNATIVES:' in line.upper():
                 alt_text = line.split(':', 1)[1].strip() if ':' in line else ''
                 if alt_text.lower() not in ['none', 'n/a', '']:
+                    # Look for alternatives in following lines
                     if i + 1 < len(lines):
                         for j in range(i + 1, min(i + 5, len(lines))):
                             alt_line = lines[j].strip()
-                            if alt_line and (alt_line.startswith('-') or alt_line.startswith('•') or alt_line.startswith('*') or (len(alt_line) > 0 and alt_line[0].isdigit() and '.' in alt_line[:3])):
+                            if alt_line and (alt_line.startswith('-') or alt_line.startswith('•') or 
+                                           alt_line.startswith('*') or 
+                                           (len(alt_line) > 0 and alt_line[0].isdigit() and '.' in alt_line[:3])):
                                 clean_alt = alt_line.lstrip('-•*0123456789. ').strip()
-                                if clean_alt:
+                                if clean_alt and clean_alt.lower() != 'none':
                                     result['alternatives'].append(clean_alt)
         
-        # Fallback parsing
+        # Fallback parsing if structured format wasn't used
         if not result['interpretation']:
             for line in lines:
                 clean_line = line.strip()
-                if clean_line and len(clean_line) > 2 and not clean_line.startswith('**') and not clean_line.startswith('---'):
+                if (clean_line and len(clean_line) > 1 and 
+                    not clean_line.startswith('**') and 
+                    not clean_line.startswith('---') and
+                    not clean_line.startswith('PRIMARY') and
+                    not clean_line.startswith('CONFIDENCE') and
+                    not clean_line.startswith('REASONING')):
                     result['interpretation'] = clean_line
                     break
         
+        # Last resort: look for uppercase words in the response
         if not result['interpretation']:
             import re
             words = re.findall(r'\b[A-Z]{2,}\b', response_text)
             if words:
                 result['interpretation'] = words[0]
+        
+        # Ensure we have some interpretation
+        if not result['interpretation']:
+            result['interpretation'] = "Unable to interpret sequence"
+            result['confidence'] = 'LOW'
+            result['reasoning'] = "Could not parse AI response"
         
         return result
     
@@ -253,3 +281,11 @@ Original Sequence: {result.get('original_sequence', 'N/A')}
         output += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         
         return output
+    
+    def get_model_info(self):
+        """Get information about the current model"""
+        return {
+            'model_name': self.model_name,
+            'api_key_preview': f"{self.api_key[:10]}..." if self.api_key else None,
+            'available': self.model is not None
+        }
