@@ -8,7 +8,7 @@ from pathlib import Path
 
 # Import the required modules
 try:
-    from signPredict import ASLClassifier
+    from src.signPredict import ASLClassifier
     MODEL_AVAILABLE = True
 except ImportError:
     MODEL_AVAILABLE = False
@@ -16,7 +16,7 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from predictSentence import SentencePredictor
+    from src.predictSentence import SentencePredictor
     LLM_AVAILABLE = True
 except ImportError:
     LLM_AVAILABLE = False
