@@ -9,7 +9,7 @@ class ASLClassifier:
     ASL Sign Language Classifier using trained YOLO model
     """
 
-    def __init__(self, model_path="./retrained_asl_model.pt"):
+    def __init__(self, model_path="../model/retrained_asl_model.pt"):
         """
         Initialize the classifier with a trained model
 

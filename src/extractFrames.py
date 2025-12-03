@@ -47,18 +47,3 @@ def extract_frames(video_path, frame_gap=5, output_folder="extracted_frames"):
     print(f"✅ Extracted {len(frame_paths)} frames to {output_dir}")
     
     return frame_paths, output_dir
-
-def main():
-    import sys
-    
-    if len(sys.argv) < 2:
-        print("Usage: python extractFrames.py <video_file> [frame_gap]")
-        return
-    
-    video_path = sys.argv[1]
-    frame_gap = int(sys.argv[2]) if len(sys.argv) > 2 else 5
-    
-    extract_frames(video_path, frame_gap)
-
-if __name__ == "__main__":
-    main()

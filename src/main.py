@@ -29,7 +29,7 @@ class VideoPlayer(QMainWindow):
         self.current_frame_idx = 0
         self.total_frames = 0
         self.fps = 30
-        self.frame_gap = 5
+        self.frame_gap = 10
         self.classifier = None
         self.sentence_predictor = None
         self.predictions = {}
@@ -62,8 +62,8 @@ class VideoPlayer(QMainWindow):
         # Frame gap selector
         top_layout.addWidget(QLabel("Frame Gap:"))
         self.gap_combo = QComboBox()
-        self.gap_combo.addItems(["1", "2", "3", "5", "10", "15"])
-        self.gap_combo.setCurrentText("5")
+        self.gap_combo.addItems(["5", "10", "15"])
+        self.gap_combo.setCurrentText("10")
         self.gap_combo.currentTextChanged.connect(self.change_frame_gap)
         top_layout.addWidget(self.gap_combo)
         
@@ -242,16 +242,12 @@ class VideoPlayer(QMainWindow):
         
         # Show loading message
         self.ai_display.setText("🔄 Analyzing sequence with AI...\n\nPlease wait...")
-        QApplication.processEvents()  # Update UI
+        QApplication.processEvents()
         
         try:
-            # Call LLM
             result = self.sentence_predictor.predict_sentence(sequence)
-            
-            # Format and display result
             formatted_result = self.sentence_predictor.format_result(result)
             self.ai_display.setText(formatted_result)
-            
             self.status_bar.showMessage(f"AI Interpretation: {result['interpretation']}")
             
         except Exception as e:
@@ -262,8 +258,12 @@ class VideoPlayer(QMainWindow):
     def load_video(self):
         """Load a video file"""
         file_dialog = QFileDialog()
+        
+        # Default to content folder if it exists
+        default_dir = "./content" if os.path.exists("./content") else "."
+        
         file_path, _ = file_dialog.getOpenFileName(
-            self, "Select Video File", "",
+            self, "Select Video File", default_dir,
             "Video Files (*.mp4 *.avi *.mov *.mkv *.wmv);;All Files (*.*)"
         )
         
@@ -271,7 +271,6 @@ class VideoPlayer(QMainWindow):
             self.video_path = file_path
             self.video_label.setText(os.path.basename(file_path))
             
-            # Open video
             self.cap = cv2.VideoCapture(file_path)
             if not self.cap.isOpened():
                 QMessageBox.critical(self, "Error", "Cannot open video file!")
@@ -285,11 +284,9 @@ class VideoPlayer(QMainWindow):
             self.sequence_display.clear()
             self.ai_display.clear()
             
-            # Setup progress slider
             self.progress_slider.setRange(0, self.total_frames - 1)
             self.progress_slider.setEnabled(True)
             
-            # Enable controls
             self.play_btn.setEnabled(True)
             self.prev_btn.setEnabled(True)
             self.next_btn.setEnabled(True)
@@ -297,7 +294,6 @@ class VideoPlayer(QMainWindow):
             self.video_loaded = True
             self.status_bar.showMessage(f"Loaded: {os.path.basename(file_path)} - {self.total_frames} frames")
             
-            # Show first frame
             self.show_frame()
     
     def show_frame(self):
@@ -305,15 +301,11 @@ class VideoPlayer(QMainWindow):
         if not self.video_loaded or not self.cap:
             return
         
-        # Set video position
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame_idx)
-        
-        # Read frame
         ret, frame = self.cap.read()
         if not ret:
             return
         
-        # Get or create prediction (only for frames matching frame_gap)
         if self.current_frame_idx % self.frame_gap == 0:
             if self.current_frame_idx not in self.predictions:
                 self.status_bar.showMessage(f"Predicting frame {self.current_frame_idx}...")
@@ -323,21 +315,16 @@ class VideoPlayer(QMainWindow):
             else:
                 prediction = self.predictions[self.current_frame_idx]
         else:
-            # Find nearest predicted frame
             prediction = self.find_nearest_prediction()
             if prediction["prediction"] == "--":
-                # Show message that this frame doesn't align with gap
                 self.status_bar.showMessage(f"Frame {self.current_frame_idx} - Use Next/Prev to jump to predicted frames (gap={self.frame_gap})")
         
-        # Update display
         self.update_display(frame, prediction)
         
-        # Update progress slider without triggering valueChanged
         self.progress_slider.blockSignals(True)
         self.progress_slider.setValue(self.current_frame_idx)
         self.progress_slider.blockSignals(False)
         
-        # Update frame label
         self.frame_label.setText(f"Frame: {self.current_frame_idx}/{self.total_frames - 1}")
     
     def predict_frame(self, frame):
@@ -346,15 +333,11 @@ class VideoPlayer(QMainWindow):
             return {"prediction": "NO MODEL", "confidence": 0.0}
         
         try:
-            # Save temporary file
             with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
                 temp_path = tmp.name
                 cv2.imwrite(temp_path, frame)
             
-            # Get prediction
             result = self.classifier.predict_single_image(temp_path, show=False, save=False)
-            
-            # Clean up
             os.unlink(temp_path)
             
             return {
@@ -372,7 +355,6 @@ class VideoPlayer(QMainWindow):
         if not self.predictions:
             return {"prediction": "--", "confidence": 0.0}
         
-        # Find the closest predicted frame
         closest_idx = min(self.predictions.keys(), 
                          key=lambda x: abs(x - self.current_frame_idx))
         
@@ -383,36 +365,28 @@ class VideoPlayer(QMainWindow):
     
     def update_display(self, frame, prediction):
         """Update the display with frame and prediction"""
-        # Convert BGR to RGB
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         height, width, channel = frame_rgb.shape
         bytes_per_line = 3 * width
         
-        # Create QImage
         qimage = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
-        
-        # Create overlay with prediction
         pixmap = QPixmap.fromImage(qimage)
         painter = QPainter(pixmap)
         
-        # Add prediction overlay
         pred_text = prediction["prediction"]
         confidence = prediction["confidence"]
         
-        # Set color based on confidence
         if confidence > 0.7:
-            color = QColor(76, 175, 80)  # Green
+            color = QColor(76, 175, 80)
         elif confidence > 0.4:
-            color = QColor(255, 193, 7)  # Yellow
+            color = QColor(255, 193, 7)
         else:
-            color = QColor(244, 67, 54)  # Red
+            color = QColor(244, 67, 54)
         
-        # Draw semi-transparent overlay
         painter.setBrush(QBrush(QColor(0, 0, 0, 180)))
         painter.setPen(Qt.NoPen)
         painter.drawRect(0, 0, width, 80)
         
-        # Draw prediction text
         font = QFont()
         font.setPointSize(36)
         font.setBold(True)
@@ -422,7 +396,6 @@ class VideoPlayer(QMainWindow):
         text_rect = QRect(0, 0, width, 80)
         painter.drawText(text_rect, Qt.AlignCenter, pred_text)
         
-        # Draw confidence
         font.setPointSize(16)
         painter.setFont(font)
         painter.setPen(QPen(Qt.white, 2))
@@ -431,12 +404,10 @@ class VideoPlayer(QMainWindow):
         conf_rect = QRect(0, 50, width, 30)
         painter.drawText(conf_rect, Qt.AlignCenter, conf_text)
         
-        # Draw frame number and gap indicator
         frame_text = f"Frame {self.current_frame_idx}"
         painter.setPen(QPen(Qt.white, 1))
         painter.drawText(10, height - 10, frame_text)
         
-        # Add indicator if this is a predicted frame
         if self.current_frame_idx % self.frame_gap == 0:
             painter.setPen(QPen(QColor(76, 175, 80), 2))
             painter.drawText(10, height - 30, f"✓ Predicted (Gap: {self.frame_gap})")
@@ -446,7 +417,6 @@ class VideoPlayer(QMainWindow):
         
         painter.end()
         
-        # Scale pixmap to fit display
         scaled_pixmap = pixmap.scaled(
             self.video_display.size(), 
             Qt.KeepAspectRatio, 
@@ -455,17 +425,13 @@ class VideoPlayer(QMainWindow):
         
         self.video_display.setPixmap(scaled_pixmap)
         
-        # Update prediction labels
         self.pred_label.setText(pred_text)
         self.conf_label.setText(f"Confidence: {confidence:.1%}")
         
-        # Update prediction history (only for predicted frames)
         if self.current_frame_idx % self.frame_gap == 0 and confidence > 0.3:
             history_text = f"Frame {self.current_frame_idx}: {pred_text} ({confidence:.1%})"
             self.history_list.addItem(history_text)
             self.history_list.scrollToBottom()
-            
-            # Update sequence display
             self.update_sequence(pred_text, confidence)
     
     def update_sequence(self, prediction, confidence):
@@ -476,35 +442,31 @@ class VideoPlayer(QMainWindow):
         current_text = self.sequence_display.toPlainText()
         predictions = current_text.split()
         
-        # Only add if different from last prediction
         if not predictions or predictions[-1] != prediction:
             predictions.append(prediction)
             new_text = " ".join(predictions)
             self.sequence_display.setText(new_text)
     
     def next_frame(self):
-        """Go to next frame - respects frame_gap"""
+        """Go to next frame"""
         if not self.video_loaded:
             return
         
-        # Jump by frame_gap instead of 1
         next_idx = self.current_frame_idx + self.frame_gap
         
         if next_idx < self.total_frames:
             self.current_frame_idx = next_idx
             self.show_frame()
         else:
-            # Stop at last frame
             self.paused = True
             self.play_btn.setText("▶ Play")
             self.timer.stop()
     
     def prev_frame(self):
-        """Go to previous frame - respects frame_gap"""
+        """Go to previous frame"""
         if not self.video_loaded or self.current_frame_idx == 0:
             return
         
-        # Jump back by frame_gap instead of 1
         prev_idx = self.current_frame_idx - self.frame_gap
         self.current_frame_idx = max(0, prev_idx)
         self.show_frame()
@@ -521,7 +483,6 @@ class VideoPlayer(QMainWindow):
             self.timer.stop()
         else:
             self.play_btn.setText("⏸ Pause")
-            # Calculate delay based on frame_gap and fps
             delay = int((1000 / self.fps) * self.frame_gap)
             self.timer.start(delay)
     
@@ -535,21 +496,14 @@ class VideoPlayer(QMainWindow):
     
     def change_frame_gap(self, value):
         """Change frame gap setting"""
-        old_gap = self.frame_gap
         self.frame_gap = int(value)
         
-        # Snap to nearest valid frame for new gap
         if self.video_loaded:
-            # Round current frame to nearest multiple of new gap
             self.current_frame_idx = (self.current_frame_idx // self.frame_gap) * self.frame_gap
-            
-            # Clear predictions since gap changed
             self.predictions.clear()
             self.history_list.clear()
             self.sequence_display.clear()
             self.ai_display.clear()
-            
-            # Refresh current frame
             self.show_frame()
         
         self.status_bar.showMessage(f"Frame gap changed to: {value} (moved to frame {self.current_frame_idx})")
@@ -560,18 +514,14 @@ class VideoPlayer(QMainWindow):
             self.cap.release()
         event.accept()
 
-def main():
+
+if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     
-    # Set application style
     app.setStyleSheet("""
-        QMainWindow {
-            background-color: #2b2b2b;
-        }
-        QLabel {
-            color: #ffffff;
-        }
+        QMainWindow { background-color: #2b2b2b; }
+        QLabel { color: #ffffff; }
         QPushButton {
             background-color: #4CAF50;
             color: white;
@@ -580,12 +530,8 @@ def main():
             border-radius: 4px;
             font-weight: bold;
         }
-        QPushButton:hover {
-            background-color: #45a049;
-        }
-        QPushButton:disabled {
-            background-color: #666666;
-        }
+        QPushButton:hover { background-color: #45a049; }
+        QPushButton:disabled { background-color: #666666; }
         QGroupBox {
             color: #ffffff;
             border: 2px solid #4CAF50;
@@ -631,5 +577,4 @@ def main():
     
     sys.exit(app.exec_())
 
-if __name__ == "__main__":
-    main()
+
