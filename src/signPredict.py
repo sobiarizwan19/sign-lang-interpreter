@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import os
 import sys
 import contextlib
@@ -29,26 +31,26 @@ class ASLClassifier:
                 "./retrained_asl_model.pt",
                 "retrained_asl_model.pt"
             ]
-        
+
         self.model_path = None
         for path in possible_paths:
             abs_path = os.path.abspath(path)
             if os.path.exists(abs_path):
                 self.model_path = abs_path
                 break
-        
+
         if self.model_path is None:
             raise FileNotFoundError(
                 f"ASL model not found. Searched paths:\n" +
                 "\n".join(f"  - {os.path.abspath(p)}" for p in possible_paths) +
                 f"\n\nCurrent working directory: {os.getcwd()}"
             )
-        
+
         try:
             self.model = YOLO(self.model_path)
         except Exception as e:
             raise Exception(f"Failed to load model: {e}")
-    
+
     def predict_single_image(self, image_path, show=False, save=False, save_path="./prediction.jpg"):
         """
         Classify a single image
@@ -62,17 +64,17 @@ class ASLClassifier:
         """
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image not found at {image_path}")
-        
+
         # Run prediction
         results = self.model(image_path)
         result = results[0]
-        
+
         # Extract predictions
         probs = result.probs
         top5_indices = probs.top5
         top5_conf = probs.top5conf.tolist()
         class_names = result.names
-        
+
         # Build prediction dictionary
         predictions = {
             'top_class': class_names[top5_indices[0]],
@@ -85,9 +87,9 @@ class ASLClassifier:
                 for idx, conf in zip(top5_indices, top5_conf)
             ]
         }
-        
+
         return predictions
-    
+
     def get_model_info(self):
         """Get information about the loaded model"""
         return {
