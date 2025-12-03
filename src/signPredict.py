@@ -1,4 +1,6 @@
 import os
+import sys
+import contextlib
 from pathlib import Path
 from ultralytics import YOLO
 from PIL import Image
@@ -7,7 +9,6 @@ class ASLClassifier:
     """
     ASL Sign Language Classifier using trained YOLO model
     """
-    
     def __init__(self, model_path=None):
         """
         Initialize the classifier with a trained model
@@ -16,7 +17,6 @@ class ASLClassifier:
         """
         # Default model paths to try
         src_dir = Path(__file__).parent.absolute()
-        
         if model_path:
             possible_paths = [model_path]
         else:
@@ -44,12 +44,8 @@ class ASLClassifier:
                 f"\n\nCurrent working directory: {os.getcwd()}"
             )
         
-        print(f"📦 Loading model from: {os.path.basename(self.model_path)}")
-        print(f"📁 Full path: {self.model_path}")
-        
         try:
             self.model = YOLO(self.model_path)
-            print("✅ Model loaded successfully!")
         except Exception as e:
             raise Exception(f"Failed to load model: {e}")
     
