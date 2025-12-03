@@ -52,7 +52,7 @@ def main():
     
     # Import and initialize analyzer
     try:
-        from asl_console_analyzer import ASLConsoleAnalyzer
+        from src.asl_console_analyzer import ASLConsoleAnalyzer
         
         # Create analyzer with configuration
         analyzer = ASLConsoleAnalyzer(
