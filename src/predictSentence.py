@@ -31,27 +31,57 @@ class SentencePredictor:
         
         # Use provided model or try defaults
         if model_name:
-            model_attempts = [f'models/{model_name}']
+            # Remove 'models/' prefix if present for SDK initialization
+            clean_model_name = model_name.replace('models/', '')
+            model_attempts = [clean_model_name]
         else:
             model_attempts = [
-                'models/gemini-2.0-flash-exp',
-                'models/gemini-1.5-flash',
-                'models/gemini-1.5-pro',
-                'models/gemini-pro'
+                'gemini-2.0-flash-exp',
+                'gemini-1.5-flash',
+                'gemini-1.5-pro',
+                'gemini-pro'
             ]
         
         self.model = None
         self.model_name = None
         
+        # Safety settings to prevent blocking
+        safety_settings = [
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_HATE_SPEECH",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "threshold": "BLOCK_NONE"
+            }
+        ]
+        
         for model_name in model_attempts:
             try:
-                test_model = genai.GenerativeModel(model_name)
+                test_model = genai.GenerativeModel(
+                    model_name,
+                    safety_settings=safety_settings
+                )
+                # Test with simple prompt
                 test_response = test_model.generate_content("Test")
+                # Verify we can access text
+                _ = test_response.text
                 self.model = test_model
                 self.model_name = model_name
+                print(f"✓ Successfully initialized model: {model_name}")
                 break
             except Exception as e:
                 error_msg = str(e)
+                print(f"✗ Failed to initialize {model_name}: {error_msg[:100]}")
                 if "API key" in error_msg.lower():
                     break  # Don't try other models if API key is invalid
                 continue
@@ -100,134 +130,86 @@ class SentencePredictor:
                 )
             )
             
-            result = self._parse_response(response.text, alphabet_sequence)
+            # Check if response was blocked
+            if not response.parts:
+                return {
+                    'interpretation': alphabet_sequence.replace(' ', ''),
+                    'alternatives': [],
+                    'confidence': "LOW",
+                    'raw_response': "",
+                    'reasoning': "Response blocked by safety filters",
+                    'original_sequence': alphabet_sequence
+                }
+            
+            # Try to get text
+            try:
+                response_text = response.text
+            except Exception as e:
+                # If response.text fails, try to get from parts
+                if response.parts:
+                    response_text = ''.join(part.text for part in response.parts if hasattr(part, 'text'))
+                else:
+                    raise e
+            
+            result = self._parse_response(response_text, alphabet_sequence)
             return result
             
         except Exception as e:
+            error_msg = str(e)
+            print(f"API Error: {error_msg}")
+            
+            # Fallback: return simple interpretation
+            simple_interpretation = alphabet_sequence.replace(' ', '')
             return {
-                'interpretation': f"API Error",
+                'interpretation': simple_interpretation,
                 'alternatives': [],
                 'confidence': "LOW",
                 'raw_response': "",
-                'reasoning': f"API call failed: {str(e)[:100]}...",
+                'reasoning': f"API error - showing raw sequence. Error: {error_msg[:100]}",
                 'original_sequence': alphabet_sequence
             }
     
     def _create_prompt(self, alphabet_sequence: str) -> str:
-        """Create a detailed prompt for Gemini"""
-        prompt = f"""You are an expert in American Sign Language (ASL) interpretation. You have been given a sequence of individual letters that were detected from ASL fingerspelling in a video.
+        """Create a simple, direct prompt for Gemini"""
+        prompt = f"""Interpret this ASL fingerspelling sequence as an English word or phrase:
 
-**Detected ASL Letter Sequence:**
-{alphabet_sequence}
+Sequence: {alphabet_sequence}
 
-**Your Task:**
-Interpret what word or sentence is being spelled. Consider the following:
+The letters are from sign language detection. Some letters might be duplicated or missing due to detection errors.
 
-1. **Letter Spacing**: The letters are space-separated and represent individual signs detected at different points in the video
-2. **Potential Errors**: The detection system may have:
-   - Missed some letters
-   - Detected duplicate letters when the hand was held still
-   - Misidentified similar-looking signs (e.g., M/N, A/S, R/U)
-3. **Context**: Consider common English words and phrases
-4. **Multiple Interpretations**: If the sequence is ambiguous, provide alternative interpretations
-
-**Response Format:**
-Provide your response in exactly this structure:
-
-PRIMARY INTERPRETATION: [Your best guess at the intended word/sentence]
-
-CONFIDENCE: [HIGH/MEDIUM/LOW]
-
-REASONING: [Brief explanation of why you chose this interpretation]
-
-ALTERNATIVES: [List 2-3 alternative interpretations, or write "None"]
-
-**Example Response:**
-
-PRIMARY INTERPRETATION: HELLO
-
-CONFIDENCE: HIGH
-
-REASONING: The sequence "H E L L O" clearly spells a common greeting with no ambiguity.
-
-ALTERNATIVES: None
-
----
-
-**Now interpret the sequence above:**"""
+What English word or phrase is being spelled? Respond with just the word or phrase."""
         return prompt
     
     def _parse_response(self, response_text: str, original_sequence: str) -> dict:
         """Parse Gemini's response into structured format"""
-        lines = response_text.strip().split('\n')
+        # With simpler prompt, response should be just the word/phrase
+        interpretation = response_text.strip()
+        
+        # Remove any quotes or extra formatting
+        interpretation = interpretation.strip('"\'')
+        
+        # Remove common prefixes
+        for prefix in ['PRIMARY INTERPRETATION:', 'INTERPRETATION:', 'Answer:', 'Word:']:
+            if interpretation.upper().startswith(prefix.upper()):
+                interpretation = interpretation[len(prefix):].strip()
+        
+        # Determine confidence based on sequence similarity
+        sequence_no_spaces = original_sequence.replace(' ', '')
+        confidence = 'HIGH'
+        
+        if interpretation.upper() == sequence_no_spaces.upper():
+            confidence = 'HIGH'
+        elif len(interpretation) != len(sequence_no_spaces):
+            confidence = 'MEDIUM'
         
         result = {
-            'interpretation': '',
+            'interpretation': interpretation if interpretation else sequence_no_spaces,
             'alternatives': [],
-            'confidence': 'MEDIUM',
+            'confidence': confidence,
             'raw_response': response_text,
-            'reasoning': '',
+            'reasoning': 'ASL sequence interpreted by AI',
             'original_sequence': original_sequence
         }
-        
-        for i, line in enumerate(lines):
-            line = line.strip()
-            
-            if 'PRIMARY INTERPRETATION:' in line.upper():
-                result['interpretation'] = line.split(':', 1)[1].strip() if ':' in line else line
-            
-            elif 'CONFIDENCE:' in line.upper():
-                confidence_text = line.split(':', 1)[1].strip() if ':' in line else ''
-                confidence = confidence_text.upper()
-                if 'HIGH' in confidence:
-                    result['confidence'] = 'HIGH'
-                elif 'LOW' in confidence:
-                    result['confidence'] = 'LOW'
-                else:
-                    result['confidence'] = 'MEDIUM'
-            
-            elif 'REASONING:' in line.upper():
-                result['reasoning'] = line.split(':', 1)[1].strip() if ':' in line else line
-            
-            elif 'ALTERNATIVES:' in line.upper():
-                alt_text = line.split(':', 1)[1].strip() if ':' in line else ''
-                if alt_text.lower() not in ['none', 'n/a', '']:
-                    # Look for alternatives in following lines
-                    if i + 1 < len(lines):
-                        for j in range(i + 1, min(i + 5, len(lines))):
-                            alt_line = lines[j].strip()
-                            if alt_line and (alt_line.startswith('-') or alt_line.startswith('•') or 
-                                           alt_line.startswith('*') or 
-                                           (len(alt_line) > 0 and alt_line[0].isdigit() and '.' in alt_line[:3])):
-                                clean_alt = alt_line.lstrip('-•*0123456789. ').strip()
-                                if clean_alt and clean_alt.lower() != 'none':
-                                    result['alternatives'].append(clean_alt)
-        
-        # Fallback parsing if structured format wasn't used
-        if not result['interpretation']:
-            for line in lines:
-                clean_line = line.strip()
-                if (clean_line and len(clean_line) > 1 and 
-                    not clean_line.startswith('**') and 
-                    not clean_line.startswith('---') and
-                    not clean_line.startswith('PRIMARY') and
-                    not clean_line.startswith('CONFIDENCE') and
-                    not clean_line.startswith('REASONING')):
-                    result['interpretation'] = clean_line
-                    break
-        
-        # Last resort: look for uppercase words in the response
-        if not result['interpretation']:
-            import re
-            words = re.findall(r'\b[A-Z]{2,}\b', response_text)
-            if words:
-                result['interpretation'] = words[0]
-        
-        # Ensure we have some interpretation
-        if not result['interpretation']:
-            result['interpretation'] = "Unable to interpret sequence"
-            result['confidence'] = 'LOW'
-            result['reasoning'] = "Could not parse AI response"
         
         return result
     
