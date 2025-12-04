@@ -17,3 +17,6 @@ torchvision>=0.15.0
 
 # Optional: For better video codec support
 imageio-ffmpeg>=0.4.0
+
+# Preprocessing
+mediapipe
