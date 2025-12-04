@@ -39,7 +39,6 @@ Thumbs.db
 *.tflite
 *.tflite.*
 *.pth
-*.pt
 *.onnx
 *.pb
 *.weights
