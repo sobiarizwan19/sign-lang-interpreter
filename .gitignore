@@ -46,10 +46,9 @@ Thumbs.db
 *.ckpt
 
 # Exclude content folder videos (keep folder)
-content/*
+uploads/*
+preprocessed/*
 
-# If you want to allow ONE default demo video:
-!content/demo.mp4
 
 # VS Code
 *.code-workspace
