@@ -136,29 +136,30 @@ class ASLVideoDetector:
             return "Gemini API key not configured"
         
         prompt = f"""
-        I have ASL (American Sign Language) detection results in format (letter,count).
-        Each (letter,count) pair represents a single letter held for 'count' consecutive frames.
+        I have ASL (American Sign Language) detection results in format (letter, count).
+        Each (letter, count) pair represents a single letter held for “count” consecutive frames.
         The sequence of pairs represents the order of letters in the ASL message.
-        When no hand is detected, it's represented as 'SPACE' which indicates a pause between words.
-        
-        I'm providing you with TWO filtered versions of the same detection:
-        1. FILTER 50%: Less rigorous filtering (50% threshold)
-        2. FILTER 20%: More rigorous filtering (20% threshold)
-        
-        Make a valid English word, phrase or sentence from it.
-        SENTANCE ,PHRASE OR WORD MUST BE IN ENGLISH LANGUAGE,VALID AND MAKE SENSE.
-        Consider both filtered versions to make the best interpretation.
-        
-        FOLLOWING ALPHABETS ARE MORE LIKELY TO BE SWAPPED:
-        'M' and 'N'
-        'A' and 'Y'
-        'O' and 'C'
-        FOLLOWING ALPHABETS ARE MORE LIKELY TO BE MISSED:
-        'D','Z','J'
+        When no hand is detected, it is represented as “SPACE”, indicating separation between words.
+
+        I am providing TWO filtered versions of the same detection:
+        1 FILTER 50% — less rigorous
+        2 FILTER 20% — more rigorous
+
+        Your task:
+        ➡ Return a valid English word, phrase, or sentence that is meaningful.
+        ➡ Consider BOTH filtered outputs to determine the best interpretation.
+        ➡ No explanation — return only the interpretation.
+
+        ALPHABET CONFUSIONS (GIVE HIGH PRIORITY TO THESE WHEN DECIDING FINAL OUTPUT):
+        - More likely swapped: M ↔ N, A ↔ Y, O ↔ C
+        - More likely to be missing: D, Z, J
+        ➡ Give more importance and priority to letters belonging to the above lists when they appear or are near-conflicts.
+
+        DATA:
         FILTER 50%: {filter_50_format}
         FILTER 20%: {filter_20_format}
-        
-        Just return the interpretation without any explanations.
+
+        Return only the final interpreted English word, phrase, or sentence.
         """
         
         try:
