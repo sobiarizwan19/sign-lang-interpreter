@@ -15,7 +15,7 @@ GAP = 5
 CONF_THRESHOLD = 0.5
 GEMINI_API_KEY = "AIzaSyCv2XlAHLKQBCp6TzGk1GDiGLJ-EJ0mJ_g"
 GEMINI_MODEL = "gemini-2.5-flash"
-FILTER_THRESHOLD_PERCENT = 35
+FILTER_THRESHOLD_PERCENT = 30
 NO_HAND_CONFIDENCE_THRESHOLD = 0.1
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -80,10 +80,9 @@ class ASLVideoDetector:
         
         # New confidence-based logic:
         # IF CONFIDENCE OF HIGHEST CONFIDENT BOX IS ABOVE 0.5 THEN ADD ALPHABETS
-        if max_confidence > 0.5:
+        if max_confidence > self.conf_threshold:
             return best_class, max_confidence
-        # IF LESS THEN 0.2 THEN ADD SPACE
-        elif max_confidence < 0.2:
+        elif max_confidence < self.no_hand_threshold:
             return "SPACE", max_confidence
         # OTHERWISE IGNORE
         else:

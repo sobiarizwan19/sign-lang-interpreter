@@ -20,7 +20,7 @@ import time
 # Configuration
 API_URL = "http://127.0.0.1:8000/translate"
 CONTENT_DIR = "./content"
-SPECIFIC_FILE = None  # Set to filename (e.g., "good-morning.mp4") to test only that file, or None to test all files
+SPECIFIC_FILE = "dog.mp4"  # Set to filename (e.g., "good-morning.mp4") to test only that file, or None to test all files
 
 def filename_to_expected(filename):
     """Convert filename to expected text."""
