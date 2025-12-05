@@ -122,7 +122,7 @@ class ASLVideoDetector:
         prompt = f"""
         I have ASL (American Sign Language) detection results in format (letter,count).
         The letters should be in same order and counts represent consecutive detections.
-        There might be outliers. Make a valid English word, phrase or sentence from it.
+        There might be outliers. Make a valid English word, phrase or sentence from it, which is grammatically correct and it makes full sense.
         
         Format: {compressed_format}
         
@@ -178,14 +178,11 @@ class ASLVideoDetector:
             )
             
             best_class, confidence = self.get_top_detection(results)
-            
             if best_class is not None and confidence > self.conf_threshold:
                 self.detection_history.append((processed_count, best_class, confidence))
                 detection_count += 1
-                
-                # Log first few detections
-                if detection_count <= 5:
-                    logger.info(f"Frame {frame_count}: Detected '{best_class}' with confidence {confidence:.2f}")
+            
+                logger.info(f"Frame {frame_count}: Detected '{best_class}' with confidence {confidence:.2f}")
         
         self.cap.release()
         logger.info(f"Processing complete. Total frames: {frame_count}, Processed: {processed_count}, Detections: {detection_count}")
