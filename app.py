@@ -7,6 +7,7 @@ import google.generativeai as genai
 import logging
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware  # ADD THIS
 import tempfile
 import shutil
 import re
@@ -407,6 +408,15 @@ detector = ASLVideoDetector(
 
 app = FastAPI(title="ASL Translator API")
 
+# ADD CORS MIDDLEWARE - THIS IS THE FIX!
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins (for development)
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allow all headers
+)
+
 @app.post("/translate")
 async def translate_video(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv')):
@@ -421,7 +431,7 @@ async def translate_video(file: UploadFile = File(...)):
         
         interpretation = detector.run_detection(temp_file_path)
         
-        return JSONResponse(content={"interpretation": interpretation})
+        return JSONResponse(content={"translation": interpretation})
     
     except Exception as e:
         logger.error(f"Processing error: {str(e)}")
