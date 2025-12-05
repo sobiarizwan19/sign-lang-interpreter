@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
-Simple ASL Video Test Script
-Tests videos against API and matches with filenames (case insensitive)
+ASL Video Test Script with Partial Word Match Percentage
+Tests videos against API and calculates match percentage.
 
 Usage:
 1. Test all videos: Set SPECIFIC_FILE = None
 2. Test specific video: Set SPECIFIC_FILE = "filename.mp4"
-
-Examples:
-- SPECIFIC_FILE = None                    # Test all videos
-- SPECIFIC_FILE = "good-morning.mp4"      # Test only good-morning.mp4
-- SPECIFIC_FILE = "i-love-you.mp4"        # Test only i-love-you.mp4
 """
 
 import os
@@ -20,11 +15,10 @@ import time
 # Configuration
 API_URL = "http://127.0.0.1:8002/translate"
 CONTENT_DIR = "./content"
-SPECIFIC_FILE = "thank-you.mp4"  # Set to filename (e.g., "good-morning.mp4") to test only that file, or None to test all files
+SPECIFIC_FILE = "i-love-you.mp4"  # Set to filename or None
 
 def filename_to_expected(filename):
     """Convert filename to expected text."""
-    # Remove .mp4 extension and replace hyphens with spaces
     expected = filename.replace('.mp4', '').replace('-', ' ')
     return expected.lower()
 
@@ -32,8 +26,28 @@ def normalize_text(text):
     """Normalize text for comparison (lowercase, strip spaces)."""
     return text.lower().strip()
 
+def calculate_match_percentage(expected, actual):
+    """Calculate match percentage with partial word scoring."""
+    expected_words = expected.lower().split()
+    actual_words = actual.lower().split()
+    
+    # Exact match
+    if expected.lower().strip() == actual.lower().strip():
+        return 100
+    
+    # Count matched words
+    matched_count = sum(1 for word in expected_words if word in actual_words)
+    
+    # Partial match: proportion of words matched out of total, scaled to 80%
+    if matched_count > 0:
+        partial_score = (matched_count / len(expected_words)) * 80
+        return round(partial_score, 1)
+    
+    # No words matched
+    return 0
+
 def test_video(video_path):
-    """Test a single video."""
+    """Test a single video with match percentage."""
     filename = os.path.basename(video_path)
     expected = filename_to_expected(filename)
     
@@ -51,37 +65,33 @@ def test_video(video_path):
                 
                 print(f"AI Result: '{interpretation}'")
                 
-                # Check match (case insensitive)
-                expected_norm = normalize_text(expected)
-                actual_norm = normalize_text(interpretation)
+                match_percent = calculate_match_percentage(expected, interpretation)
                 
-                if expected_norm == actual_norm:
-                    print("✅ MATCH!")
-                    return True
-                elif expected_norm in actual_norm or actual_norm in expected_norm:
-                    print("✅ PARTIAL MATCH!")
-                    return True
+                if match_percent == 100:
+                    print("✅ EXACT MATCH! (100%)")
+                elif match_percent > 0:
+                    print(f"✅ PARTIAL MATCH ({match_percent}%)")
                 else:
-                    print("❌ NO MATCH!")
-                    return False
+                    print("❌ NO MATCH (0%)")
+                
+                return match_percent
             else:
                 print(f"❌ API Error: {response.status_code}")
-                return False
+                return 0
                 
     except Exception as e:
         print(f"❌ Error: {e}")
-        return False
+        return 0
 
 def main():
     """Run all video tests."""
     print("🧪 ASL Video Tester")
     print("=" * 50)
     
-    # Get video files based on configuration
+    # Get video files
     video_files = []
     
     if SPECIFIC_FILE:
-        # Test only the specific file
         specific_path = os.path.join(CONTENT_DIR, SPECIFIC_FILE)
         if os.path.exists(specific_path) and SPECIFIC_FILE.endswith('.mp4'):
             video_files.append(specific_path)
@@ -90,7 +100,6 @@ def main():
             print(f"❌ Specific file not found: {SPECIFIC_FILE}")
             return
     else:
-        # Get all video files
         for file in os.listdir(CONTENT_DIR):
             if file.endswith('.mp4'):
                 video_files.append(os.path.join(CONTENT_DIR, file))
@@ -99,23 +108,20 @@ def main():
     
     print("=" * 50)
     
-    # Test each video
-    passed = 0
+    total_percent = 0
     total = len(video_files)
     
     for i, video_path in enumerate(video_files, 1):
         print(f"\n[{i}/{total}]", end="")
-        if test_video(video_path):
-            passed += 1
-        time.sleep(1)  # Small delay between requests
+        match_percent = test_video(video_path)
+        total_percent += match_percent
+        time.sleep(1)
     
     # Summary
     print("\n" + "=" * 50)
     print("SUMMARY:")
-    print(f"Total: {total}")
-    print(f"Passed: {passed}")
-    print(f"Failed: {total - passed}")
-    print(f"Success Rate: {passed/total*100:.1f}%" if total > 0 else "0.0%")
+    print(f"Total Videos: {total}")
+    print(f"Average Success Rate: {total_percent/total:.1f}%" if total > 0 else "0.0%")
     print("=" * 50)
 
 if __name__ == "__main__":
