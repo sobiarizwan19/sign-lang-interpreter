@@ -9,6 +9,7 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 import tempfile
 import shutil
+import re
 
 MODEL_PATH = "./model/sign-detection.pt"
 GAP = 3
@@ -172,6 +173,23 @@ class ASLVideoDetector:
         
         return current_data
     
+    def extract_interpretation(self, response_text):
+        """Extract interpretation from Gemini response by looking for INTERPRETATION: pattern"""
+        patterns = [
+            r'INTERPRETATION:\s*(.+?)(?:\n|$)',
+            r'Interpretation:\s*(.+?)(?:\n|$)',
+            r'FINAL INTERPRETATION:\s*(.+?)(?:\n|$)',
+            r'Final Interpretation:\s*(.+?)(?:\n|$)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, response_text, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        
+        # If no pattern found, return the entire response
+        return response_text.strip()
+    
     def ask_gemini(self, filtered_format):
         if self.gemini_model is None:
             return "Gemini API key not configured"
@@ -182,8 +200,20 @@ class ASLVideoDetector:
         The sequence of pairs represents the order of letters in the ASL message.
         When no hand is detected, it is represented as "SPACE", indicating separation between words.
 
+        IMPORTANT NOTE ABOUT DATA QUALITY:
+        The detection data comes from a computer vision model and may contain ERRORS.
+        Misdetected alphabets or SPACE can exist due to:
+        1. Model confusion between similar-looking signs (like M, N, T)
+        2. False positives (detecting a letter when it's actually SPACE or vice versa)
+        3. False negatives (missing letters that should be detected)
+        4. Hand movements causing temporary misclassifications
+        5. Lighting, angle, or occlusion issues
+
         Your task:
-        ➡ Return ONLY a valid and meaningful English word, phrase, or grammatically correct sentence.
+        ➡ You MUST return your final interpretation in this exact format:
+        INTERPRETATION: [your interpretation here]
+        
+        ➡ The interpretation must be a valid and meaningful English word, phrase, or grammatically correct sentence.
         ➡ It must be something a real person would logically say.
         ➡ Do NOT invent random or excessive additional letters.
         ➡ Prefer interpretations that use only the detected letters.
@@ -194,25 +224,47 @@ class ASLVideoDetector:
         2. If a letter **does NOT appear at all**, do NOT assume it unless absolutely necessary
         3. "SPACE" represents separation between words in the final sentence
         4. Respect the sequence and grouping of letters as shown
+        5. Account for possible misdetections when interpreting the data
+        6. Look for the most plausible meaningful interpretation given potential errors
+
+        HANDLING MISDETECTIONS:
+        - If the sequence seems odd or doesn't form a clear word, consider:
+          * Similar-looking letters might be confused (see ALPHABET CONFUSIONS below)
+          * Extra SPACE detections might appear between letters
+          * Some letters might be missing from the sequence
+          * The sequence might contain repeated letters due to hand movements
+        - Try to find the most logical interpretation that fits the overall pattern
+
+        CRITICAL - NO ABBREVIATIONS:
+        1. The input data contains ONLY regular English alphabet letters (A-Z) and "SPACE" - NO abbreviations
+        2. Your interpretation MUST NOT contain any abbreviations, acronyms, or shortened forms
+        3. Do NOT output things like "IDK", "LOL", "BRB", "ASAP", "FYI", etc.
+        4. Output only complete, properly spelled words and sentences
+        5. If the detected letters could form an abbreviation, find an alternative meaningful interpretation
 
         ALPHABET CONFUSIONS (ONLY WHEN NECESSARY):
-        - Possible swaps: M ↔ N ↔ T, A ↔ Y, O ↔ C
-        - Possible omissions: D, Z, J
-        ➡ Use these ONLY to resolve ambiguity, not to create new random words.
+        - Common ASL confusions: M ↔ N ↔ T, A ↔ S ↔ Y ↔ E, O ↔ C, D ↔ F,
+        - Space vs letter confusion: Sometimes SPACE might be detected as a letter or vice versa
+        - Possible omissions: D, Z, J, G (these are harder to detect clearly)
+        ➡ Use these confusions ONLY to resolve ambiguity and create meaningful interpretations
+        ➡ Do NOT use them to create random new words
 
         FILTERED DATA: {filtered_format}
 
-        Return only ONE final result:
-        ✔ Valid English
-        ✔ Meaningful
-        ✔ Uses primarily detected letters
-        ✔ Grammatically correct (if a sentence)
-        ✔ Respects SPACE as word separators
+        Your output MUST start with "INTERPRETATION: " followed by your interpretation.
+        Do NOT include any other text, explanations, or comments.
+        Do NOT output abbreviations - only complete words and proper sentences.
+        Remember: The data may contain errors - find the most plausible meaningful interpretation.
         """
         
         try:
             response = self.gemini_model.generate_content(prompt)
-            return response.text.strip()
+            response_text = response.text.strip()
+            
+            # Extract interpretation using pattern matching
+            interpretation = self.extract_interpretation(response_text)
+            return interpretation
+            
         except Exception as e:
             return f"Error: {e}"
     
