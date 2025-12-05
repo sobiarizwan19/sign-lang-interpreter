@@ -19,7 +19,7 @@ GEMINI_MODEL = "gemini-2.5-flash"
 NO_HAND_CONFIDENCE_THRESHOLD = 0.2
 
 # Filtering parameters
-PERCENT_OF_HIGHEST_VALUE_FOR_FINAL_FILTER_THRESHOLD = 0.3  # 0.5% as decimal (0.005)
+PERCENT_OF_AVERAGE_TOP5_FOR_FINAL_FILTER_THRESHOLD = 0.3  # 30% of average of top 5 counts
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class ASLVideoDetector:
         self.GAP = gap
         self.conf_threshold = conf_threshold
         self.no_hand_threshold = NO_HAND_CONFIDENCE_THRESHOLD
-        self.percent_for_final_threshold = PERCENT_OF_HIGHEST_VALUE_FOR_FINAL_FILTER_THRESHOLD
+        self.percent_for_final_threshold = PERCENT_OF_AVERAGE_TOP5_FOR_FINAL_FILTER_THRESHOLD
         
         if GEMINI_API_KEY:
             genai.configure(api_key=GEMINI_API_KEY)
@@ -159,24 +159,44 @@ class ASLVideoDetector:
         
         return merged
     
-    def calculate_dynamic_threshold(self, compressed_detections):
-        """Calculate dynamic threshold as a percentage of the highest count"""
+    def calculate_average_of_top5(self, compressed_detections):
+        """Calculate the average of the top 5 count values"""
         if not compressed_detections:
-            return 3  # Minimum value (2 + 1)
+            return 0
         
         # Extract all counts
         counts = [count for _, count in compressed_detections]
         
-        # Find the highest count
-        if counts:
-            highest_count = max(counts)
-            # Calculate percentage of the highest count
-            dynamic_threshold = int(highest_count * self.percent_for_final_threshold)
+        # Sort counts in descending order
+        counts.sort(reverse=True)
+        
+        # Take the top 5 or all available if less than 5
+        top_counts = counts[:5]
+        
+        # Calculate average
+        average_top5 = sum(top_counts) / len(top_counts)
+        
+        logger.info(f"Top {len(top_counts)} counts: {top_counts}")
+        logger.info(f"Average of top {len(top_counts)}: {average_top5:.2f}")
+        
+        return average_top5
+    
+    def calculate_dynamic_threshold(self, compressed_detections):
+        """Calculate dynamic threshold as a percentage of the average of top 5 counts"""
+        if not compressed_detections:
+            return 3  # Minimum value (2 + 1)
+        
+        # Calculate average of top 5 counts
+        average_top5 = self.calculate_average_of_top5(compressed_detections)
+        
+        if average_top5 > 0:
+            # Calculate percentage of the average top 5
+            dynamic_threshold = int(average_top5 * self.percent_for_final_threshold)
             
             # Ensure threshold is at least 3 (2 + 1)
             dynamic_threshold = max(3, dynamic_threshold)
             
-            logger.info(f"Dynamic threshold calculated: {dynamic_threshold} ({self.percent_for_final_threshold}% of highest count: {highest_count})")
+            logger.info(f"Dynamic threshold calculated: {dynamic_threshold} ({self.percent_for_final_threshold*100}% of average top 5: {average_top5:.2f})")
             return dynamic_threshold
         
         return 3  # Minimum value (2 + 1)
@@ -185,7 +205,7 @@ class ASLVideoDetector:
         if not compressed_detections:
             return []
         
-        # Calculate dynamic threshold
+        # Calculate dynamic threshold based on average of top 5 counts
         dynamic_threshold = self.calculate_dynamic_threshold(compressed_detections)
         
         current_threshold = 2  # Hardcoded initial threshold
@@ -232,59 +252,73 @@ class ASLVideoDetector:
 
         IMPORTANT NOTE ABOUT DATA QUALITY:
         The detection data comes from a computer vision model and may contain ERRORS.
-        Misdetected alphabets or SPACE can exist due to:
-        1. Model confusion between similar-looking signs (like M, N, T)
-        2. False positives (detecting a letter when it's actually SPACE or vice versa)
-        3. False negatives (missing letters that should be detected)
-        4. Hand movements causing temporary misclassifications
+        Misdetections may occur due to:
+        1. Model confusion between visually similar signs
+        2. False positives (detecting a letter instead of SPACE)
+        3. False negatives (missing letters)
+        4. Hand movements causing temporary misclassification
         5. Lighting, angle, or occlusion issues
 
         Your task:
         ➡ You MUST return your final interpretation in this exact format:
         INTERPRETATION: [your interpretation here]
-        
-        ➡ The interpretation must be a valid and meaningful English word, phrase, or grammatically correct sentence.
+
+        ➡ The interpretation must be a valid and meaningful English word, phrase, or sentence.
         ➡ It must be something a real person would logically say.
-        ➡ Do NOT invent random or excessive additional letters.
-        ➡ Prefer interpretations that use only the detected letters.
-        ➡ "SPACE" in the data indicates word boundaries.
+        ➡ Prefer interpretations using ONLY the detected letters.
+        ➡ "SPACE" in the data indicates word separation.
+        ➡ Do NOT invent unnecessary extra letters.
 
         IMPORTANT RULES:
-        1. Use primarily the letters that appear in the filtered data
-        2. If a letter **does NOT appear at all**, do NOT assume it unless absolutely necessary
-        3. "SPACE" represents separation between words in the final sentence
-        4. Respect the sequence and grouping of letters as shown
-        5. Account for possible misdetections when interpreting the data
-        6. Look for the most plausible meaningful interpretation given potential errors
+        1. Use primarily the letters that appear in the filtered data.
+        2. If a letter does NOT appear at all, do NOT assume it unless absolutely necessary.
+        3. Respect the sequence and grouping of letters shown.
+        4. Account for possible misdetections when interpreting.
+        5. "SPACE" represents a word boundary.
 
-        HANDLING MISDETECTIONS:
-        - If the sequence seems odd or doesn't form a clear word, consider:
-          * Similar-looking letters might be confused (see ALPHABET CONFUSIONS below)
-          * Extra SPACE detections might appear between letters
-          * Some letters might be missing from the sequence
-          * The sequence might contain repeated letters due to hand movements
-        - Try to find the most logical interpretation that fits the overall pattern
+        PRIORITIZING REPEATED LETTERS:
+        - Letters with larger counts or multiple repeated detections are HIGH CONFIDENCE.
+        - Interpretation MUST prioritize words formed using strongly repeated letters.
+        - A confusion-based replacement is allowed ONLY IF:
+            ✔ The detected letter is low count, weak, or isolated
+            ✔ The replacement results in a more logical real-world interpretation
+            ✔ The change does NOT modify or contradict strongly repeated letters
+        - DO NOT replace a repeated or high-count letter merely to form a different word.
+        Example:
+            [('C', 15), ('O', 22), ('F', 23), ('E', 27)]
+            → "coffee" is correct because F and E repeat strongly.
+            → NOT "code", which wrongly replaces a reliable F with D.
 
         CRITICAL - NO ABBREVIATIONS:
-        1. The input data contains ONLY regular English alphabet letters (A-Z) and "SPACE" - NO abbreviations
-        2. Your interpretation MUST NOT contain any abbreviations, acronyms, or shortened forms
-        3. Do NOT output things like "IDK", "LOL", "BRB", "ASAP", "FYI", etc.
-        4. Output only complete, properly spelled words and sentences
-        5. If the detected letters could form an abbreviation, find an alternative meaningful interpretation
+        - The input contains only A-Z and SPACE — NO abbreviations.
+        - Your interpretation MUST NOT contain abbreviations or acronyms.
+        - Do NOT output things like: IDK, LOL, BRB, ASAP, FYI, etc.
+        - Output only complete properly spelled English words or sentences.
 
-        ALPHABET CONFUSIONS (ONLY WHEN NECESSARY):
-        - Common ASL confusions: M ↔ N ↔ T, A ↔ S ↔ Y ↔ E, O ↔ C, D ↔ F,
-        - Space vs letter confusion: Sometimes SPACE might be detected as a letter or vice versa
-        - Possible omissions: D, Z, J, G (these are harder to detect clearly)
-        ➡ Use these confusions ONLY to resolve ambiguity and create meaningful interpretations
-        ➡ Do NOT use them to create random new words
+        ALPHABET CONFUSIONS (USE ONLY WHEN NECESSARY):
+        - Common ASL confusions include:
+            M ↔ N ↔ T
+            A ↔ S ↔ Y ↔ E
+            O ↔ C
+            D ↔ F
+        - Space may also be confused with a letter.
+        - Use these ONLY to clarify a meaningful interpretation, not to create random words.
+
+        Handling Misinterpretations:
+        - If the resulting sequence looks odd or incomplete:
+            * Consider similar-letter confusion ONLY when logical
+            * Remove accidental SPACE only if clearly noise
+            * Correct repeated fragments caused by movement
+        - Always choose the most plausible real-world meaningful interpretation.
 
         FILTERED DATA: {filtered_format}
 
-        Your output MUST start with "INTERPRETATION: " followed by your interpretation.
-        Do NOT include any other text, explanations, or comments.
-        Do NOT output abbreviations - only complete words and proper sentences.
-        Remember: The data may contain errors - find the most plausible meaningful interpretation.
+        Your output MUST:
+        - Start with: INTERPRETATION:
+        - Contain ONLY the interpretation (no notes, NO explanation)
+        - Use complete words (NO abbreviations)
+
+        Remember: The data may contain errors — find the MOST logical and meaningful interpretation.
         """
         
         try:
