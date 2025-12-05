@@ -15,8 +15,8 @@ import time
 # Configuration
 API_URL = "http://127.0.0.1:8002/translate"
 CONTENT_DIR = "./content"
-SPECIFIC_FILE = "i-love-you.mp4"  # Set to filename or None
-
+SPECIFIC_FILE = "thank-you.mp4"  # Set to filename or None
+# SPECIFIC_FILE = None  # Test all videos
 def filename_to_expected(filename):
     """Convert filename to expected text."""
     expected = filename.replace('.mp4', '').replace('-', ' ')

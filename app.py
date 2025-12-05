@@ -19,9 +19,7 @@ GEMINI_MODEL = "gemini-2.5-flash"
 NO_HAND_CONFIDENCE_THRESHOLD = 0.2
 
 # Filtering parameters
-INITIAL_FILTER_THRESHOLD = 2
-FINAL_FILTER_THRESHOLD = 15  # This will be dynamically calculated
-FILTER_INCREMENT = 3
+PERCENT_OF_HIGHEST_VALUE_FOR_FINAL_FILTER_THRESHOLD = 0.3  # 0.5% as decimal (0.005)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -31,6 +29,7 @@ class ASLVideoDetector:
         self.GAP = gap
         self.conf_threshold = conf_threshold
         self.no_hand_threshold = NO_HAND_CONFIDENCE_THRESHOLD
+        self.percent_for_final_threshold = PERCENT_OF_HIGHEST_VALUE_FOR_FINAL_FILTER_THRESHOLD
         
         if GEMINI_API_KEY:
             genai.configure(api_key=GEMINI_API_KEY)
@@ -88,27 +87,33 @@ class ASLVideoDetector:
             return None, max_confidence
     
     def log_consecutive_detection(self, frame_num, letter, confidence):
+        LOG_FMT = "Frame {start:>5}-{end:<5} | Detected {letter:<7} | Count:{count:>3}"
+
         if letter != self.current_letter:
+            # If previous letter ended, log it
             if self.current_letter is not None:
-                if self.current_letter_start_frame == frame_num - self.GAP:
-                    logger.info(f"Frame {self.current_letter_start_frame}-{frame_num}: Detected '{self.current_letter}'")
-                else:
-                    logger.info(f"Frame {self.current_letter_start_frame}-{frame_num-self.GAP}: Detected '{self.current_letter}'")
-            
+                end_frame = (
+                    frame_num if self.current_letter_start_frame == frame_num - self.GAP
+                    else frame_num - self.GAP
+                )
+
+                logger.info(LOG_FMT.format(
+                    start=self.current_letter_start_frame,
+                    end=end_frame,
+                    letter=self.current_letter,
+                    count=self.current_letter_count
+                ))
+
+            # Reset trackers for new letter
             self.current_letter = letter
             self.current_letter_start_frame = frame_num
             self.current_letter_count = 1
             self.current_letter_confidences = [confidence]
+
         else:
+            # Same letter, continue count
             self.current_letter_count += 1
-            self.current_letter_confidences.append(confidence)
-    
-    def finalize_logging(self):
-        if self.current_letter is not None:
-            if self.current_letter_count == 1:
-                logger.info(f"Frame {self.current_letter_start_frame}: Detected '{self.current_letter}'")
-            else:
-                logger.info(f"Frame {self.current_letter_start_frame}+: Detected '{self.current_letter}'")
+            self.current_letter_confidences.append(confidence)  
     
     def compress_consecutive_detections(self):
         if not self.detection_history:
@@ -155,9 +160,9 @@ class ASLVideoDetector:
         return merged
     
     def calculate_dynamic_threshold(self, compressed_detections):
-        """Calculate dynamic threshold as 0.5% of the highest count"""
+        """Calculate dynamic threshold as a percentage of the highest count"""
         if not compressed_detections:
-            return FINAL_FILTER_THRESHOLD  # Default value
+            return 3  # Minimum value (2 + 1)
         
         # Extract all counts
         counts = [count for _, count in compressed_detections]
@@ -165,19 +170,16 @@ class ASLVideoDetector:
         # Find the highest count
         if counts:
             highest_count = max(counts)
-            # Calculate 0.5% of the highest count
-            dynamic_threshold = int(highest_count * 0.5)
+            # Calculate percentage of the highest count
+            dynamic_threshold = int(highest_count * self.percent_for_final_threshold)
             
-            # Ensure threshold is within reasonable bounds
-            # Minimum should be at least INITIAL_FILTER_THRESHOLD + FILTER_INCREMENT
-            dynamic_threshold = max(INITIAL_FILTER_THRESHOLD + FILTER_INCREMENT, dynamic_threshold)
-            # Maximum should not exceed the original FINAL_FILTER_THRESHOLD
-            dynamic_threshold = min(dynamic_threshold, FINAL_FILTER_THRESHOLD)
+            # Ensure threshold is at least 3 (2 + 1)
+            dynamic_threshold = max(3, dynamic_threshold)
             
-            logger.info(f"Dynamic threshold calculated: {dynamic_threshold} (0.5% of highest count: {highest_count})")
+            logger.info(f"Dynamic threshold calculated: {dynamic_threshold} ({self.percent_for_final_threshold}% of highest count: {highest_count})")
             return dynamic_threshold
         
-        return FINAL_FILTER_THRESHOLD  # Default value
+        return 3  # Minimum value (2 + 1)
     
     def apply_recursive_filter(self, compressed_detections):
         if not compressed_detections:
@@ -185,8 +187,8 @@ class ASLVideoDetector:
         
         # Calculate dynamic threshold
         dynamic_threshold = self.calculate_dynamic_threshold(compressed_detections)
-        logger.info(f"Applying recursive filtering up to dynamic threshold: {dynamic_threshold}")
-        current_threshold = INITIAL_FILTER_THRESHOLD
+        
+        current_threshold = 2  # Hardcoded initial threshold
         current_data = compressed_detections.copy()
         
         while current_threshold <= dynamic_threshold:
@@ -197,7 +199,7 @@ class ASLVideoDetector:
             
             grouped_data = self.merge_consecutive_same(filtered_data)
             current_data = grouped_data
-            current_threshold += FILTER_INCREMENT
+            current_threshold += 1  # Hardcoded increment of 1
         
         return current_data
     
@@ -342,7 +344,6 @@ class ASLVideoDetector:
                 if self.current_letter is not None:
                     self.log_consecutive_detection(frame_count, None, confidence)
         
-        self.finalize_logging()
         
         self.cap.release()
         logger.info("Processing complete.")
