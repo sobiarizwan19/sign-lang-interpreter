@@ -18,9 +18,9 @@ import requests
 import time
 
 # Configuration
-API_URL = "http://127.0.0.1:8000/translate"
+API_URL = "http://127.0.0.1:8002/translate"
 CONTENT_DIR = "./content"
-SPECIFIC_FILE = "dog.mp4"  # Set to filename (e.g., "good-morning.mp4") to test only that file, or None to test all files
+SPECIFIC_FILE = "thank-you.mp4"  # Set to filename (e.g., "good-morning.mp4") to test only that file, or None to test all files
 
 def filename_to_expected(filename):
     """Convert filename to expected text."""
@@ -121,7 +121,7 @@ def main():
 if __name__ == "__main__":
     # Check if API is running
     try:
-        requests.get("http://127.0.0.1:8000", timeout=5)
+        requests.get("http://127.0.0.1:8002", timeout=5)
         print("✅ API is running")
     except:
         print("❌ API not running! Start with: python app.py")
