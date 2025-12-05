@@ -20,7 +20,7 @@ NO_HAND_CONFIDENCE_THRESHOLD = 0.2
 
 # Filtering parameters
 INITIAL_FILTER_THRESHOLD = 2
-FINAL_FILTER_THRESHOLD = 15
+FINAL_FILTER_THRESHOLD = 15  # This will be dynamically calculated
 FILTER_INCREMENT = 3
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -91,7 +91,7 @@ class ASLVideoDetector:
         if letter != self.current_letter:
             if self.current_letter is not None:
                 if self.current_letter_start_frame == frame_num - self.GAP:
-                    logger.info(f"Frame {self.current_letter_start_frame}: Detected '{self.current_letter}'")
+                    logger.info(f"Frame {self.current_letter_start_frame}-{frame_num}: Detected '{self.current_letter}'")
                 else:
                     logger.info(f"Frame {self.current_letter_start_frame}-{frame_num-self.GAP}: Detected '{self.current_letter}'")
             
@@ -154,14 +154,42 @@ class ASLVideoDetector:
         
         return merged
     
+    def calculate_dynamic_threshold(self, compressed_detections):
+        """Calculate dynamic threshold as 0.5% of the highest count"""
+        if not compressed_detections:
+            return FINAL_FILTER_THRESHOLD  # Default value
+        
+        # Extract all counts
+        counts = [count for _, count in compressed_detections]
+        
+        # Find the highest count
+        if counts:
+            highest_count = max(counts)
+            # Calculate 0.5% of the highest count
+            dynamic_threshold = int(highest_count * 0.5)
+            
+            # Ensure threshold is within reasonable bounds
+            # Minimum should be at least INITIAL_FILTER_THRESHOLD + FILTER_INCREMENT
+            dynamic_threshold = max(INITIAL_FILTER_THRESHOLD + FILTER_INCREMENT, dynamic_threshold)
+            # Maximum should not exceed the original FINAL_FILTER_THRESHOLD
+            dynamic_threshold = min(dynamic_threshold, FINAL_FILTER_THRESHOLD)
+            
+            logger.info(f"Dynamic threshold calculated: {dynamic_threshold} (0.5% of highest count: {highest_count})")
+            return dynamic_threshold
+        
+        return FINAL_FILTER_THRESHOLD  # Default value
+    
     def apply_recursive_filter(self, compressed_detections):
         if not compressed_detections:
             return []
         
+        # Calculate dynamic threshold
+        dynamic_threshold = self.calculate_dynamic_threshold(compressed_detections)
+        logger.info(f"Applying recursive filtering up to dynamic threshold: {dynamic_threshold}")
         current_threshold = INITIAL_FILTER_THRESHOLD
         current_data = compressed_detections.copy()
         
-        while current_threshold <= FINAL_FILTER_THRESHOLD:
+        while current_threshold <= dynamic_threshold:
             filtered_data = []
             for item, count in current_data:
                 if count >= current_threshold:
