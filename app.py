@@ -1,1543 +1,307 @@
-#!/usr/bin/env python3
-"""
-ASL Video Analyzer with Frequency Analysis
-Complete project in a single file
-"""
-
 import cv2
-import os
-import tempfile
-import sys
-import math
-from pathlib import Path
-import asyncio
 import numpy as np
-from nicegui import ui, app
-from dotenv import load_dotenv
-import google.generativeai as genai
 from ultralytics import YOLO
-from PIL import Image
+import time
+import os
+import google.generativeai as genai
+import gradio as gr
+import logging
 
-# Try to import MediaPipe, but make it optional
-try:
-    import mediapipe as mp
-    MEDIAPIPE_AVAILABLE = True
-except ImportError:
-    print("⚠ Warning: MediaPipe not installed. Background removal will be disabled.")
-    MEDIAPIPE_AVAILABLE = False
+# ===== CONFIG VARIABLES - CHANGE THESE =====
+MODEL_PATH = "./model/sign-detection.pt"
+GAP = 5
+CONF_THRESHOLD = 0.5
+GEMINI_API_KEY = "AIzaSyCv2XlAHLKQBCp6TzGk1GDiGLJ-EJ0mJ_g"
+GEMINI_MODEL = "gemini-2.5-flash"
+FILTER_THRESHOLD_PERCENT = 30  # Mean - 30% threshold
+# ===========================================
 
-# ============================================================================
-# Configuration
-# ============================================================================
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
-
-# Configuration variables
-VIDEO_PATH = os.getenv('VIDEO_PATH', '../content/demo.mp4')
-FRAME_GAP = int(os.getenv('FRAME_GAP', '10'))
-MODEL_PATH = os.getenv('MODEL_PATH', '../model/retrained_asl_model.pt')
-CONFIDENCE_THRESHOLD = float(os.getenv('CONFIDENCE_THRESHOLD', '0.5'))
-OUTLIER_STD_THRESHOLD = float(os.getenv('OUTLIER_STD_THRESHOLD', '1.5'))
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyCb-XaqhT3v1He3cTRH0zn6QCZFwHBKRNs')
-GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
-ENABLE_PREPROCESSING = os.getenv('ENABLE_PREPROCESSING', 'true').lower() == 'true'
-
-# ============================================================================
-# Video Preprocessor (MediaPipe Background Removal)
-# ============================================================================
-
-class VideoPreprocessor:
-    """Handles video preprocessing including background removal"""
-    
-    def __init__(self):
-        """Initialize the preprocessor"""
-        self.mediapipe_available = MEDIAPIPE_AVAILABLE
+class ASLVideoDetector:
+    def __init__(self, model_path, gap, conf_threshold):
+        self.GAP = gap
+        self.conf_threshold = conf_threshold
         
-    def remove_background_mediapipe_fast(self, input_path, output_path, start_frame=None, end_frame=None):
-        """
-        Fast hand segmentation using MediaPipe
-        
-        Args:
-            input_path: Path to input video
-            output_path: Path to save processed video
-            start_frame: Optional start frame (if None, process from beginning)
-            end_frame: Optional end frame (if None, process to end)
-            
-        Returns:
-            tuple: (start_frame, end_frame, processed_count) or None if failed
-        """
-        if not self.mediapipe_available:
-            print("❌ MediaPipe not available. Skipping background removal.")
-            return None
-        
-        print("Initializing MediaPipe...")
-        
-        try:
-            # Initialize MediaPipe Selfie Segmentation
-            mp_selfie_segmentation = mp.solutions.selfie_segmentation
-            selfie_segmentation = mp_selfie_segmentation.SelfieSegmentation(model_selection=1)
-            
-            print("Opening video...")
-            cap = cv2.VideoCapture(input_path)
-            
-            if not cap.isOpened():
-                print(f"❌ Cannot open video: {input_path}")
-                return None
-            
-            # Get video properties
-            fps = int(cap.get(cv2.CAP_PROP_FPS))
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            
-            print(f"\n📹 Video Information:")
-            print(f"  Resolution: {width}x{height}")
-            print(f"  FPS: {fps}")
-            print(f"  Total frames: {total_frames}")
-            print(f"  Duration: {total_frames/fps:.2f} seconds")
-            
-            # Determine frame range
-            if start_frame is None:
-                start_frame = 0
-            if end_frame is None:
-                end_frame = total_frames - 1
-            
-            # Validate frame range
-            if start_frame < 0 or start_frame >= total_frames:
-                start_frame = 0
-            if end_frame <= start_frame or end_frame > total_frames:
-                end_frame = total_frames - 1
-            
-            # Calculate number of frames to process
-            frames_to_process = end_frame - start_frame + 1
-            
-            print(f"\n🔄 Processing frames {start_frame} to {end_frame} ({frames_to_process} frames)")
-            print(f"  Segment duration: {frames_to_process/fps:.2f} seconds")
-            
-            # Setup output - we'll write at the original fps
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-            
-            # Seek to start frame
-            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-            
-            frame_count = 0
-            processed_count = 0
-            print("\n⚡ Processing started...")
-            
-            while cap.isOpened() and processed_count < frames_to_process:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                
-                current_frame = start_frame + processed_count
-                
-                # Convert BGR to RGB
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
-                # Process with MediaPipe
-                results = selfie_segmentation.process(rgb_frame)
-                
-                # Get segmentation mask
-                if results.segmentation_mask is not None:
-                    # Create mask - adjust threshold as needed
-                    mask = results.segmentation_mask > 0.1
-                    
-                    # Create black background
-                    black_bg = np.zeros_like(frame)
-                    
-                    # Apply mask
-                    for c in range(3):
-                        black_bg[:, :, c] = np.where(
-                            mask == 1, 
-                            frame[:, :, c], 
-                            0  # Black background
-                        )
-                    
-                    out.write(black_bg)
-                else:
-                    # If no mask, write black frame
-                    out.write(np.zeros_like(frame))
-                
-                processed_count += 1
-                
-                # Show progress every 10 frames
-                if processed_count % 10 == 0:
-                    progress_pct = processed_count/frames_to_process*100
-                    print(f"  Processed frame {current_frame}/{end_frame} "
-                          f"({processed_count}/{frames_to_process} frames | "
-                          f"{progress_pct:.1f}%)")
-            
-            cap.release()
-            out.release()
-            selfie_segmentation.close()
-            
-            print(f"\n✅ Preprocessing complete!")
-            print(f"  Processed {processed_count} frames ({start_frame} to {end_frame})")
-            print(f"  Output saved to: {output_path}")
-            
-            # Return the frame range for reference
-            return start_frame, end_frame, processed_count
-            
-        except Exception as e:
-            print(f"❌ Error during preprocessing: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def preprocess_video(self, input_path, output_dir="preprocessed", frame_range=None):
-        """
-        Preprocess video by removing background
-        
-        Args:
-            input_path: Path to input video
-            output_dir: Directory to save preprocessed video
-            frame_range: Optional tuple (start_frame, end_frame)
-            
-        Returns:
-            str: Path to preprocessed video or original if preprocessing fails
-        """
-        if not ENABLE_PREPROCESSING or not self.mediapipe_available:
-            print("⚠ Preprocessing disabled or MediaPipe not available")
-            return input_path
-        
-        try:
-            # Create output directory
-            Path(output_dir).mkdir(exist_ok=True)
-            
-            # Generate output filename
-            input_name = Path(input_path).stem
-            output_path = str(Path(output_dir) / f"{input_name}_preprocessed.mp4")
-            
-            print(f"\n🔧 Starting video preprocessing...")
-            print(f"  Input: {input_path}")
-            print(f"  Output: {output_path}")
-            
-            # Extract frame range if provided
-            start_frame = None
-            end_frame = None
-            if frame_range and len(frame_range) == 2:
-                start_frame, end_frame = frame_range
-            
-            # Process video
-            result = self.remove_background_mediapipe_fast(
-                input_path, output_path, start_frame, end_frame
-            )
-            
-            if result:
-                print(f"✅ Successfully preprocessed video")
-                return output_path
-            else:
-                print(f"⚠ Preprocessing failed, using original video")
-                return input_path
-                
-        except Exception as e:
-            print(f"❌ Error in preprocessing: {e}")
-            return input_path
-    
-    def extract_video_info(self, video_path):
-        """Extract basic information from video"""
-        try:
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                return None
-            
-            fps = int(cap.get(cv2.CAP_PROP_FPS))
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            duration = total_frames / fps if fps > 0 else 0
-            
-            cap.release()
-            
-            return {
-                'fps': fps,
-                'width': width,
-                'height': height,
-                'total_frames': total_frames,
-                'duration': duration,
-                'resolution': f"{width}x{height}"
-            }
-        except Exception as e:
-            print(f"Error extracting video info: {e}")
-            return None
-
-# ============================================================================
-# ASL Classifier (YOLO Model)
-# ============================================================================
-
-class ASLClassifier:
-    """
-    ASL Sign Language Classifier using trained YOLO model
-    """
-    def __init__(self, model_path=None):
-        """
-        Initialize the classifier with a trained model
-        Args:
-            model_path: Path to the trained model weights
-        """
-        # Default model paths to try
-        current_dir = Path(__file__).parent.absolute()
-        if model_path:
-            possible_paths = [model_path]
+        # Gemini API setup
+        if GEMINI_API_KEY:
+            genai.configure(api_key=GEMINI_API_KEY)
+            self.gemini_model = genai.GenerativeModel(GEMINI_MODEL)
+            logger.info("Gemini API configured successfully")
         else:
-            possible_paths = [
-                str(current_dir / MODEL_PATH),
-                str(current_dir / "../model/retrained_asl_model.pt"),
-                str(current_dir / "../../model/retrained_asl_model.pt"),
-                "./model/retrained_asl_model.pt",
-                "../model/retrained_asl_model.pt",
-                "model/retrained_asl_model.pt",
-                "./retrained_asl_model.pt",
-                "retrained_asl_model.pt"
-            ]
-
-        self.model_path = None
-        for path in possible_paths:
-            abs_path = os.path.abspath(path)
-            if os.path.exists(abs_path):
-                self.model_path = abs_path
-                break
-
-        if self.model_path is None:
-            raise FileNotFoundError(
-                f"ASL model not found. Searched paths:\n" +
-                "\n".join(f"  - {os.path.abspath(p)}" for p in possible_paths) +
-                f"\n\nCurrent working directory: {os.getcwd()}"
-            )
-
-        try:
-            self.model = YOLO(self.model_path)
-        except Exception as e:
-            raise Exception(f"Failed to load model: {e}")
-
-    def predict_single_image(self, image_path, show=False, save=False, save_path="./prediction.jpg"):
-        """
-        Classify a single image
-        Args:
-            image_path: Path to the image file
-            show: Whether to display the result
-            save: Whether to save the result
-            save_path: Path to save the result
-        Returns:
-            dict: Prediction results with top predictions
-        """
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image not found at {image_path}")
-
-        # Run prediction
-        results = self.model(image_path)
-        result = results[0]
-
-        # Extract predictions
-        probs = result.probs
-        top5_indices = probs.top5
-        top5_conf = probs.top5conf.tolist()
-        class_names = result.names
-
-        # Build prediction dictionary
-        predictions = {
-            'top_class': class_names[top5_indices[0]],
-            'top_confidence': top5_conf[0],
-            'top5': [
-                {
-                    'class': class_names[idx],
-                    'confidence': conf
-                }
-                for idx, conf in zip(top5_indices, top5_conf)
-            ]
-        }
-
-        return predictions
-
-    def get_model_info(self):
-        """Get information about the loaded model"""
-        return {
-            'model_path': self.model_path,
-            'model_name': os.path.basename(self.model_path),
-            'classes': list(self.model.names.values()) if hasattr(self.model, 'names') else None
-        }
-
-# ============================================================================
-# Sentence Predictor (Gemini LLM)
-# ============================================================================
-
-class SentencePredictor:
-    """
-    Predicts sentences from ASL alphabet sequences using Google Gemini
-    with support for weighted frequency analysis
-    """
+            logger.warning("Gemini API key not set. Interpretation will be skipped.")
+            self.gemini_model = None
+        
+        logger.info(f"Loading model: {model_path}")
+        self.model = YOLO(model_path)
+        self.model.fuse()
+        logger.info(f"Model loaded: {self.model.names}")
+        
+        self.cap = None
+        self.video_path = None
+        self.class_names = self.model.names
+        self.detection_history = []
+        
+    def setup_video(self, video_path):
+        if not os.path.exists(video_path):
+            logger.error(f"Video not found: {video_path}")
+            return False
+        
+        self.cap = cv2.VideoCapture(video_path)
+        self.video_path = video_path
+        
+        if not self.cap.isOpened():
+            logger.error("Could not open video file!")
+            return False
+        
+        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        logger.info(f"Video loaded: {video_path}")
+        logger.info(f"Total frames: {self.total_frames}")
+        logger.info(f"Config: GAP={self.GAP}, CONF={self.conf_threshold}")
+        return True
     
-    def __init__(self, api_key: str = None, model_name: str = None):
-        """
-        Initialize Gemini API
+    def get_top_detection(self, results):
+        if results[0].boxes is None or len(results[0].boxes) == 0:
+            return None, 0
         
-        Args:
-            api_key: Google Gemini API key (if None, uses default)
-            model_name: Gemini model to use (if None, tries defaults)
-        """
-        # Use provided API key or default
-        if api_key is None:
-            api_key = GEMINI_API_KEY
+        confidences = results[0].boxes.conf.cpu().numpy()
+        class_ids = results[0].boxes.cls.cpu().numpy().astype(int)
         
-        self.api_key = api_key
-        genai.configure(api_key=self.api_key)
+        max_confidence = 0
+        best_class = None
         
-        # Use provided model or try defaults
-        if model_name:
-            # Remove 'models/' prefix if present for SDK initialization
-            clean_model_name = model_name.replace('models/', '')
-            model_attempts = [clean_model_name]
-        else:
-            model_attempts = [
-                'gemini-2.0-flash-exp',
-                'gemini-1.5-flash',
-                'gemini-1.5-pro',
-                'gemini-pro'
-            ]
+        for class_id, confidence in zip(class_ids, confidences):
+            if confidence > self.conf_threshold and confidence > max_confidence:
+                max_confidence = confidence
+                best_class = self.class_names[class_id]
         
-        self.model = None
-        self.model_name = None
-        
-        # Safety settings to prevent blocking
-        safety_settings = [
-            {
-                "category": "HARM_CATEGORY_HARASSMENT",
-                "threshold": "BLOCK_ONLY_HIGH"
-            },
-            {
-                "category": "HARM_CATEGORY_HATE_SPEECH",
-                "threshold": "BLOCK_ONLY_HIGH"
-            },
-            {
-                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "threshold": "BLOCK_ONLY_HIGH"
-            },
-            {
-                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                "threshold": "BLOCK_ONLY_HIGH"
-            }
-        ]
-        
-        for model_name in model_attempts:
-            try:
-                test_model = genai.GenerativeModel(
-                    model_name,
-                    safety_settings=safety_settings
-                )
-                # Test with simple prompt
-                test_response = test_model.generate_content("Test")
-                # Verify we can access text
-                _ = test_response.text
-                self.model = test_model
-                self.model_name = model_name
-                print(f"✓ Successfully initialized model: {model_name}")
-                break
-            except Exception as e:
-                error_msg = str(e)
-                print(f"✗ Failed to initialize {model_name}: {error_msg[:100]}")
-                if "API key" in error_msg.lower():
-                    break  # Don't try other models if API key is invalid
-                continue
-        
-        if self.model is None:
-            raise Exception("Could not initialize any Gemini model")
+        return best_class, max_confidence
     
-    def predict_weighted_sentence(self, frequency_sequence: str) -> dict:
-        """
-        Predict sentence from weighted frequency sequence
+    def compress_consecutive_detections(self):
+        if not self.detection_history:
+            return []
         
-        Args:
-            frequency_sequence: String of space-separated letter:count pairs (e.g., "L:6 O:4 V:5 E:6")
-            
-        Returns:
-            dict with interpretation results
-        """
-        if not frequency_sequence or frequency_sequence.strip() == "":
-            return {
-                'interpretation': "No sequence provided",
-                'alternatives': [],
-                'confidence': "LOW",
-                'raw_response': "",
-                'reasoning': "Empty sequence",
-                'original_sequence': ""
-            }
+        compressed = []
+        current_letter = None
+        current_count = 0
+        start_frame = 0
         
-        if self.model is None:
-            return {
-                'interpretation': "Model not initialized",
-                'alternatives': [],
-                'confidence': "LOW", 
-                'raw_response': "",
-                'reasoning': "Gemini model failed to initialize",
-                'original_sequence': frequency_sequence
-            }
-        
-        prompt = self._create_weighted_prompt(frequency_sequence)
-        
-        try:
-            response = self.model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.2,  # Lower temperature for more consistent results
-                    max_output_tokens=500,
-                )
-            )
-            
-            # Check if response was blocked
-            if not response.parts:
-                # Fallback to simple interpretation
-                return self._fallback_interpretation(frequency_sequence)
-            
-            # Try to get text
-            try:
-                response_text = response.text
-            except Exception as e:
-                # If response.text fails, try to get from parts
-                if response.parts:
-                    response_text = ''.join(part.text for part in response.parts if hasattr(part, 'text'))
-                else:
-                    raise e
-            
-            result = self._parse_weighted_response(response_text, frequency_sequence)
-            return result
-            
-        except Exception as e:
-            error_msg = str(e)
-            print(f"API Error: {error_msg}")
-            
-            # Fallback to simple interpretation
-            return self._fallback_interpretation(frequency_sequence)
-    
-    def _fallback_interpretation(self, frequency_sequence: str) -> dict:
-        """Simple fallback when Gemini blocks the response"""
-        # Parse the sequence
-        letters = []
-        for item in frequency_sequence.split():
-            if ':' in item:
-                letter, count = item.split(':')
-                count = int(count)
-                # Add letter with weight consideration
-                if count >= 5:  # High confidence
-                    letters.append(letter)
+        for frame_num, letter, _ in self.detection_history:
+            if letter != current_letter:
+                if current_letter is not None:
+                    compressed.append((current_letter, current_count, start_frame, frame_num-1))
+                current_letter = letter
+                current_count = 1
+                start_frame = frame_num
             else:
-                letters.append(item)
+                current_count += 1
         
-        # Try to form words from the letters
-        sequence_text = ''.join(letters)
+        if current_letter is not None:
+            compressed.append((current_letter, current_count, start_frame, self.detection_history[-1][0]))
         
-        # Simple pattern matching for common words
-        if 'CAT' in sequence_text or ('C' in letters and 'A' in letters and 'T' in letters):
-            interpretation = "CAT"
-            reasoning = "Detected letters C, A, T forming 'CAT'"
-        else:
-            interpretation = sequence_text
-            reasoning = "Gemini response blocked - showing filtered sequence"
-        
-        return {
-            'interpretation': interpretation,
-            'alternatives': [],
-            'confidence': "MEDIUM",
-            'raw_response': "",
-            'reasoning': reasoning,
-            'original_sequence': frequency_sequence
-        }
+        return compressed
     
-    def _create_weighted_prompt(self, frequency_sequence: str) -> str:
-        """Create prompt for weighted frequency interpretation"""
+    def filter_by_threshold(self, compressed_detections):
+        if not compressed_detections:
+            return []
         
-        # Parse the frequency sequence for display
-        pairs = []
-        for item in frequency_sequence.split():
-            if ':' in item:
-                letter, count = item.split(':')
-                pairs.append(f"({letter},{count})")
-            else:
-                pairs.append(f"({item},1)")
+        counts = [det[1] for det in compressed_detections]
+        mean_count = sum(counts) / len(counts)
+        threshold = mean_count * (1 - FILTER_THRESHOLD_PERCENT/100)  # Mean - 30%
         
-        pairs_str = ", ".join(pairs)
+        filtered = [det for det in compressed_detections if det[1] >= threshold]
+        
+        return filtered, mean_count, threshold
+    
+    def ask_gemini(self, compressed_format):
+        if self.gemini_model is None:
+            return "Gemini API key not configured"
         
         prompt = f"""
-            You are an expert ASL (American Sign Language) fingerspelling interpreter. Your task is to interpret a WEIGHTED sequence of letters from ASL fingerspelling.
-
-            WEIGHTED FREQUENCY SEQUENCE: {pairs_str}
-
-            Each pair (letter, count) represents:
-            - Letter: The detected ASL letter
-            - Count: How many consecutive frames showed this letter (weight/importance)
-
-            IMPORTANT RULES FOR INTERPRETATION:
-
-            1. HIGHER COUNT = MORE IMPORTANT  
-            - Letters with higher counts represent stronger confidence and should be weighted significantly more when forming the word.
-            - Letters with much lower counts than the dominant letters may represent noise and can be ignored.
-
-            2. NOISE FILTERING  
-            - If a letter has a noticeably lower count and disrupts forming a valid word, treat it as noise.
-            - Example: (C,45),(N,20),(A,25),(T,30) → "CAT" (ignore N)
-
-            3. COMMON PATTERNS TO CONSIDER:
-            - Repeated letters often indicate emphasis or part of common words (e.g., "LL" in "HELLO", "OO" in "GOOD").
-            - Some signs might be held longer (higher count) for clarity or teaching speed.
-
-            4. YOUR OUTPUT SHOULD:
-            - Form a coherent English word, phrase, or sentence.
-            - Respect the weight/importance indicated by the counts (higher count = more likely letter).
-            - Ignore clearly erroneous noise patterns.
-            - Consider common names, greetings, places, and short phrases.
-
-            EXAMPLE INTERPRETATIONS:
-            - (H,1),(E,4),(L,6),(L,2),(O,5) → "HELLO"
-            - (T,2),(H,3),(A,5),(N,4),(K,6),(Y,2),(O,3),(U,5) → "THANK YOU"
-            - (M,3),(Y,4),(N,5),(A,6),(M,4),(E,5) → "MY NAME"
-            - (C,6),(O,5),(F,4),(F,3),(E,5),(E,2) → "COFFEE"
-            - (S,5),(T,4),(A,6),(N,5),(F,3),(O,4),(R,4),(D,5) → "STANFORD"
-            - (C,45),(N,20),(A,25),(T,30) → "CAT" (N = noise)
-
-            YOUR TASK: Given the weighted frequency sequence above, provide:
-            1. The most likely English interpretation (word/phrase/sentence)
-            2. Brief reasoning for your choice, referencing weighted confidence and noise removal decisions.
-
-            Interpretation:
-            """
-        return prompt
-    
-    def _parse_weighted_response(self, response_text: str, original_sequence: str) -> dict:
-        """Parse Gemini's weighted response into structured format"""
-        # Clean the response text
-        lines = response_text.strip().split('\n')
+        I have ASL (American Sign Language) detection results in format (letter,count).
+        The letters should be in same order and counts represent consecutive detections.
+        There might be outliers. Make a valid English word, phrase or sentence from it.
         
-        interpretation = ""
-        reasoning = ""
+        Format: {compressed_format}
         
-        # Try to extract interpretation and reasoning
-        for i, line in enumerate(lines):
-            line = line.strip()
-            if not line:
-                continue
-            
-            # Look for interpretation markers
-            if any(marker in line.lower() for marker in ['interpretation:', 'output:', 'result:', 'word:', 'phrase:']):
-                parts = line.split(':', 1)
-                if len(parts) > 1:
-                    interpretation = parts[1].strip().strip('"\'')
-            elif not interpretation and i == 0:
-                # First non-empty line might be the interpretation
-                interpretation = line.strip('"\'').split('.')[0]
-            elif 'reasoning' in line.lower() or 'because' in line.lower() or len(line) > 50:
-                reasoning = line
-        
-        # If no interpretation found, use the whole response
-        if not interpretation:
-            interpretation = lines[0].strip().strip('"\'').split('.')[0]
-        
-        # If no reasoning found, create simple reasoning
-        if not reasoning:
-            reasoning = "Based on weighted frequency analysis of ASL signs"
-        
-        # Parse the original sequence to calculate statistics
-        total_weight = 0
-        letter_weights = {}
-        
-        for item in original_sequence.split():
-            if ':' in item:
-                letter, count = item.split(':')
-                weight = int(count)
-                total_weight += weight
-                if letter in letter_weights:
-                    letter_weights[letter] += weight
-                else:
-                    letter_weights[letter] = weight
-        
-        # Calculate confidence based on weight distribution
-        confidence = "MEDIUM"
-        if total_weight > 0:
-            # High confidence if most weight is concentrated in few letters
-            sorted_weights = sorted(letter_weights.values(), reverse=True)
-            if len(sorted_weights) >= 2:
-                top2_ratio = sum(sorted_weights[:2]) / total_weight
-                if top2_ratio > 0.6:
-                    confidence = "HIGH"
-                elif top2_ratio < 0.3:
-                    confidence = "LOW"
-        
-        # Generate alternatives
-        alternatives = []
-        simple_text = self._sequence_to_text(original_sequence)
-        if simple_text != interpretation:
-            alternatives.append(simple_text)
-        
-        result = {
-            'interpretation': interpretation,
-            'alternatives': alternatives,
-            'confidence': confidence,
-            'raw_response': response_text,
-            'reasoning': reasoning,
-            'original_sequence': original_sequence,
-            'total_weight': total_weight,
-            'letter_weights': letter_weights
-        }
-        
-        return result
-    
-    def _sequence_to_text(self, frequency_sequence: str) -> str:
-        """Convert frequency sequence to simple text"""
-        letters = []
-        for item in frequency_sequence.split():
-            if ':' in item:
-                letter, count = item.split(':')
-                # Repeat letter based on weight (but cap at reasonable amount)
-                repeat = min(int(count), 3)  # Cap at 3 repeats
-                letters.append(letter * repeat)
-            else:
-                letters.append(item)
-        
-        return ''.join(letters)
-    
-    def predict_sentence(self, alphabet_sequence: str) -> dict:
+        Just return the interpretation without any explanations.
         """
-        Original method - for backward compatibility
-        """
-        # Convert to weighted format and call the new method
-        weighted_seq = " ".join([f"{letter}:1" for letter in alphabet_sequence.split()])
-        return self.predict_weighted_sentence(weighted_seq)
-    
-    def get_model_info(self):
-        """Get information about the current model"""
-        return {
-            'model_name': self.model_name,
-            'api_key_preview': f"{self.api_key[:10]}..." if self.api_key else None,
-            'available': self.model is not None
-        }
-
-# ============================================================================
-# Main ASL Analyzer
-# ============================================================================
-
-class ASLAnalyzer:
-    def __init__(self, 
-                 video_path="../content/video.mp4", 
-                 frame_gap=10,
-                 model_path="../model/retrained_asl_model.pt",
-                 gemini_api_key=None,
-                 gemini_model=None,
-                 confidence_threshold=0.5,
-                 outlier_std_threshold=1.5,
-                 enable_preprocessing=True):
-        """
-        Initialize the ASL analyzer
         
-        Args:
-            video_path: Path to the video file
-            frame_gap: Process every Nth frame
-            model_path: Path to the ASL model
-            gemini_api_key: API key for Gemini
-            gemini_model: Gemini model to use
-            confidence_threshold: Minimum confidence for including predictions
-            outlier_std_threshold: Standard deviation threshold for outlier removal
-            enable_preprocessing: Whether to preprocess videos with background removal
-        """
-        # Convert paths to absolute paths
-        current_dir = Path(__file__).parent.absolute()
-        
-        # Handle video path
-        if not os.path.isabs(video_path):
-            self.video_path = str(current_dir / video_path)
-        else:
-            self.video_path = video_path
-        
-        # Handle model path
-        if not os.path.isabs(model_path):
-            self.model_path = str(current_dir / model_path)
-        else:
-            self.model_path = model_path
-            
-        self.frame_gap = frame_gap
-        self.gemini_api_key = gemini_api_key
-        self.gemini_model = gemini_model
-        self.confidence_threshold = confidence_threshold
-        self.outlier_std_threshold = outlier_std_threshold
-        self.enable_preprocessing = enable_preprocessing
-        
-        self.classifier = None
-        self.sentence_predictor = None
-        self.preprocessor = None
-        self.predictions = {}
-        self.raw_predictions = []
-        self.frequency_sequence = []
-        
-        # Initialize components
-        self._init_preprocessor()
-        self._init_classifier()
-        self._init_llm()
-        
-    def _init_preprocessor(self):
-        """Initialize the video preprocessor"""
         try:
-            self.preprocessor = VideoPreprocessor()
-            if self.preprocessor.mediapipe_available:
-                print("✓ Video preprocessor initialized (MediaPipe available)")
-            else:
-                print("⚠ Video preprocessor initialized (MediaPipe not available)")
+            logger.info("Asking Gemini for interpretation...")
+            response = self.gemini_model.generate_content(prompt)
+            logger.info(f"Gemini response received: {response.text[:50]}...")
+            return response.text.strip()
         except Exception as e:
-            self.preprocessor = None
-            print(f"⚠ Failed to initialize preprocessor: {e}")
+            logger.error(f"Gemini API error: {e}")
+            return f"Error: {e}"
     
-    def _init_classifier(self):
-        """Initialize the sign language classifier"""
-        try:
-            self.classifier = ASLClassifier(model_path=self.model_path)
-            print(f"✓ Classifier loaded: {self.classifier.model_path}")
-        except Exception as e:
-            self.classifier = None
-            raise Exception(f"Failed to initialize classifier: {e}")
-    
-    def _init_llm(self):
-        """Initialize the LLM sentence predictor"""
-        try:
-            if self.gemini_api_key:
-                self.sentence_predictor = SentencePredictor(
-                    api_key=self.gemini_api_key,
-                    model_name=self.gemini_model
-                )
-            else:
-                self.sentence_predictor = SentencePredictor(model_name=self.gemini_model)
-            print(f"✓ Gemini predictor initialized: {self.sentence_predictor.model_name}")
-        except Exception as e:
-            self.sentence_predictor = None
-            print(f"⚠ Warning: Could not initialize LLM: {e}")
-    
-    def preprocess_video(self, video_path=None):
-        """
-        Preprocess the video (background removal, etc.)
+    def run_detection(self, video_path=None):
+        """Run detection on video and return results"""
+        if video_path:
+            self.setup_video(video_path)
         
-        Args:
-            video_path: Path to video to preprocess (if None, uses self.video_path)
-            
-        Returns:
-            str: Path to preprocessed video
-        """
-        if not self.enable_preprocessing or not self.preprocessor:
-            print("⚠ Preprocessing disabled or preprocessor not available")
-            return self.video_path if video_path is None else video_path
+        # Reset history
+        self.detection_history = []
         
-        input_path = video_path if video_path is not None else self.video_path
-        
-        if not os.path.exists(input_path):
-            print(f"❌ Video file not found: {input_path}")
-            return input_path
-        
-        print(f"\n🔧 Starting video preprocessing...")
-        video_info = self.preprocessor.extract_video_info(input_path)
-        if video_info:
-            print(f"  Original video: {video_info['resolution']}, {video_info['duration']:.2f}s")
-        
-        # Preprocess the video
-        preprocessed_path = self.preprocessor.preprocess_video(input_path)
-        
-        # Update video path if preprocessing was successful
-        if preprocessed_path != input_path:
-            print(f"✅ Using preprocessed video: {preprocessed_path}")
-            if video_path is None:
-                self.video_path = preprocessed_path
-            return preprocessed_path
-        else:
-            print(f"⚠ Using original video (preprocessing skipped)")
-            return input_path
-    
-    def analyze_video(self, progress_callback=None, preprocess=True):
-        """
-        Analyze the entire video and extract sign language sequence using frequency analysis
-        
-        Args:
-            progress_callback: Optional callback for progress updates
-            preprocess: Whether to preprocess the video first
-            
-        Returns:
-            dict: Analysis results
-        """
-        # Preprocess video if enabled
-        if preprocess and self.enable_preprocessing:
-            self.preprocess_video()
-        
-        # Check if video file exists
-        if not os.path.exists(self.video_path):
-            print(f"❌ Video file not found: {self.video_path}")
-            return {
-                'error': f'Video file not found: {self.video_path}',
-                'sequence': '',
-                'interpretation': '',
-                'confidence': 'LOW'
-            }
-        
-        # Open video
-        cap = cv2.VideoCapture(self.video_path)
-        if not cap.isOpened():
-            print(f"❌ Cannot open video file: {self.video_path}")
-            return {
-                'error': f'Cannot open video: {self.video_path}',
-                'sequence': '',
-                'interpretation': '',
-                'confidence': 'LOW'
-            }
-        
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         frame_count = 0
-        raw_predictions_list = []
+        processed_count = 0
+        detection_count = 0
         
-        print(f"\n📊 Processing video: {total_frames} frames total")
-        print(f"  Processing every {self.frame_gap} frames...")
+        logger.info(f"Starting video processing...")
         
         while True:
-            ret, frame = cap.read()
+            ret, frame = self.cap.read()
             if not ret:
                 break
             
-            # Process only every frame_gap frames
-            if frame_count % self.frame_gap == 0:
-                prediction = self._predict_frame(frame)
-                if prediction:
-                    pred_letter = prediction['prediction']
-                    raw_predictions_list.append(pred_letter)
-                    
-                    # Store for debugging
-                    self.predictions[frame_count] = prediction
-            
             frame_count += 1
             
-            # Progress callback
-            if progress_callback and frame_count % (self.frame_gap * 10) == 0:
-                progress = (frame_count / total_frames) * 100
-                progress_callback(progress)
+            if (frame_count - 1) % self.GAP != 0:
+                continue
+            
+            processed_count += 1
+            
+            # Log progress every 50 processed frames
+            if processed_count % 50 == 0:
+                logger.info(f"Processed {processed_count}/{self.total_frames//self.GAP} frames...")
+            
+            results = self.model.predict(
+                source=frame,
+                conf=self.conf_threshold,
+                iou=0.45,
+                imgsz=640,
+                verbose=False,
+                max_det=20
+            )
+            
+            best_class, confidence = self.get_top_detection(results)
+            
+            if best_class is not None and confidence > self.conf_threshold:
+                self.detection_history.append((processed_count, best_class, confidence))
+                detection_count += 1
+                
+                # Log first few detections
+                if detection_count <= 5:
+                    logger.info(f"Frame {frame_count}: Detected '{best_class}' with confidence {confidence:.2f}")
         
-        cap.release()
-        
-        if not raw_predictions_list:
-            print("❌ No signs detected in the video")
-            return {
-                'error': 'No signs detected in video',
-                'sequence': '',
-                'interpretation': '',
-                'confidence': 'LOW'
-            }
-        
-        self.raw_predictions = raw_predictions_list
-        
-        print(f"\n📝 RAW PREDICTIONS: {''.join(self.raw_predictions)}")
-        print(f"  Raw predictions count: {len(self.raw_predictions)}")
-        
-        # Process frequency analysis with mean-based filtering
-        self._process_frequency_analysis_mean_filter()
-        
-        # Get interpretation
-        return self._get_interpretation()
+        self.cap.release()
+        logger.info(f"Processing complete. Total frames: {frame_count}, Processed: {processed_count}, Detections: {detection_count}")
+        return self.get_results_summary()
     
-    def _process_frequency_analysis_mean_filter(self):
-        """Process raw predictions with mean-based filtering"""
-        if not self.raw_predictions:
-            return
+    def get_results_summary(self):
+        """Get formatted results summary - returns only raw and AI interpretation"""
+        if not self.detection_history:
+            logger.warning("No detections found in video.")
+            return "No signs detected", "Please try another video"
         
-        print("\n📊 === FREQUENCY ANALYSIS (WITH MEAN FILTERING) ===")
+        compressed = self.compress_consecutive_detections()
+        filtered, _, _ = self.filter_by_threshold(compressed)
         
-        # Step 1: Group consecutive identical letters and count them
-        groups = []
-        current_letter = self.raw_predictions[0]
-        current_count = 1
+        logger.info(f"Compressed {len(self.detection_history)} detections to {len(compressed)} segments")
+        logger.info(f"After filtering: {len(filtered)} segments remain")
         
-        for i in range(1, len(self.raw_predictions)):
-            if self.raw_predictions[i] == current_letter:
-                current_count += 1
-            else:
-                groups.append((current_letter, current_count))
-                current_letter = self.raw_predictions[i]
-                current_count = 1
+        # Get raw letters
+        raw_letters = "".join([letter for letter, _, _, _ in filtered])
+        logger.info(f"Raw letters detected: {raw_letters}")
         
-        # Add the last group
-        groups.append((current_letter, current_count))
+        # Get Gemini interpretation
+        interpretation = ""
+        if self.gemini_model is not None and filtered:
+            compressed_format = " ".join([f"({letter},{count})" for letter, count, _, _ in filtered])
+            logger.info(f"Sending to Gemini: {compressed_format}")
+            interpretation = self.ask_gemini(compressed_format)
+            logger.info(f"Gemini interpretation: {interpretation}")
         
-        print(f"  Initial groups: {groups}")
-        
-        # Step 2: Calculate mean of all counts
-        if groups:
-            counts = [count for _, count in groups]
-            mean_count = sum(counts) / len(counts)
-            print(f"  Mean count: {mean_count:.2f}")
-            
-            # Step 3: Filter out groups with counts below mean
-            filtered_groups = [(letter, count) for letter, count in groups if count >= mean_count]
-            print(f"  Filtered groups (count >= {mean_count:.2f}): {filtered_groups}")
-            
-            # Step 4: Merge consecutive same letters in filtered groups
-            merged_groups = []
-            if filtered_groups:
-                current_letter, current_total = filtered_groups[0]
-                
-                for i in range(1, len(filtered_groups)):
-                    letter, count = filtered_groups[i]
-                    if letter == current_letter:
-                        # Merge consecutive same letters
-                        current_total += count
-                    else:
-                        merged_groups.append((current_letter, current_total))
-                        current_letter = letter
-                        current_total = count
-                
-                # Add the last merged group
-                merged_groups.append((current_letter, current_total))
-            
-            print(f"  Final merged groups: {merged_groups}")
-            
-            # Store the filtered and merged sequence
-            self.frequency_sequence = merged_groups
-            
-            # Show what was filtered out
-            removed = [(letter, count) for letter, count in groups if count < mean_count]
-            if removed:
-                print(f"  Removed (low frequency): {removed}")
-        else:
-            self.frequency_sequence = []
+        return raw_letters, interpretation
+
+# Initialize detector
+detector = ASLVideoDetector(
+    model_path=MODEL_PATH,
+    gap=GAP,
+    conf_threshold=CONF_THRESHOLD
+)
+
+def process_video(video_file):
+    """Process uploaded video file - with proper logging"""
+    if video_file is None:
+        logger.warning("No video file uploaded")
+        return "Upload a video first", "Upload a video first"
     
-    def _predict_frame(self, frame):
-        """
-        Predict sign for a frame - ONLY ACCEPT ALPHABET CHARACTERS (A-Z)
-        If no alphabet detected above threshold, ignore the frame
-        
-        Args:
-            frame: OpenCV frame
-            
-        Returns:
-            dict: Prediction result or None if not alphabet
-        """
-        if self.classifier is None:
-            return None
-        
-        try:
-            # Save frame temporarily
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-                temp_path = tmp.name
-                cv2.imwrite(temp_path, frame)
-            
-            # Get prediction
-            result = self.classifier.predict_single_image(temp_path, show=False, save=False)
-            
-            # Clean up temp file
-            os.unlink(temp_path)
-            
-            # Extract prediction and confidence
-            pred_letter = result['top_class']
-            confidence = float(result['top_confidence'])
-            
-            # Define valid ASL alphabet letters (ONLY A-Z)
-            valid_asl_letters = set('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
-            
-            # Check if it's a valid ASL alphabet character (A-Z) and above confidence threshold
-            if (len(pred_letter) == 1 and 
-                pred_letter.upper() in valid_asl_letters and 
-                confidence > self.confidence_threshold):
-                
-                # Convert to uppercase for consistency
-                pred_letter = pred_letter.upper()
-                
-                return {
-                    "prediction": pred_letter,
-                    "confidence": confidence,
-                    "all_predictions": result['top5']
-                }
-            else:
-                # Ignore this frame - not a valid ASL alphabet or below threshold
-                return None
-                
-        except Exception as e:
-            return None
-    
-    def _get_interpretation(self):
-        """
-        Get AI interpretation of the frequency sequence
-        """
-        if not self.frequency_sequence:
-            return {
-                'error': 'No frequency sequence generated',
-                'sequence': '',
-                'interpretation': '',
-                'confidence': 'LOW'
-            }
-        
-        # Display frequency sequence
-        sequence_str = " ".join([f"{letter}" for letter, _ in self.frequency_sequence])
-        weighted_str = ", ".join([f"({letter},{count})" for letter, count in self.frequency_sequence])
-        freq_str = " ".join([f"{letter}:{count}" for letter, count in self.frequency_sequence])
-        
-        print(f"\n🎯 === FINAL RESULTS ===")
-        print(f"  RAW LETTERS: {''.join(self.raw_predictions)}")
-        print(f"  FILTERED FREQUENCY SEQUENCE: {weighted_str}")
-        print(f"  FILTERED SIMPLE SEQUENCE: {sequence_str}")
-        
-        # Special case: If we have C, A, T, force CAT interpretation
-        letters_in_sequence = [letter for letter, _ in self.frequency_sequence]
-        if {'C', 'A', 'T'}.issubset(set(letters_in_sequence)):
-            print(f"  DETECTED C, A, T LETTERS - INTERPRETING AS 'CAT'")
-            return {
-                'raw_sequence': ''.join(self.raw_predictions),
-                'frequency_sequence': freq_str,
-                'simple_sequence': sequence_str,
-                'interpretation': "CAT",
-                'confidence': 'HIGH',
-                'reasoning': 'Detected letters C, A, T in frequency analysis forming "CAT"',
-                'alternatives': [],
-                'frequency_groups': self.frequency_sequence,
-                'preprocessed': self.enable_preprocessing,
-                'filtering_applied': True
-            }
-        
-        # Try to interpret with AI if available
-        if self.sentence_predictor:
-            try:
-                result = self.sentence_predictor.predict_weighted_sentence(freq_str)
-                
-                return {
-                    'raw_sequence': ''.join(self.raw_predictions),
-                    'frequency_sequence': freq_str,
-                    'simple_sequence': sequence_str,
-                    'interpretation': result['interpretation'],
-                    'confidence': result['confidence'],
-                    'reasoning': result.get('reasoning', ''),
-                    'alternatives': result.get('alternatives', []),
-                    'frequency_groups': self.frequency_sequence,
-                    'preprocessed': self.enable_preprocessing,
-                    'filtering_applied': True
-                }
-                
-            except Exception as e:
-                print(f"❌ Error in AI interpretation: {e}")
-                return {
-                    'raw_sequence': ''.join(self.raw_predictions),
-                    'frequency_sequence': freq_str,
-                    'simple_sequence': sequence_str,
-                    'interpretation': sequence_str,
-                    'confidence': 'LOW',
-                    'reasoning': f'AI interpretation failed: {str(e)}',
-                    'alternatives': [],
-                    'frequency_groups': self.frequency_sequence,
-                    'preprocessed': self.enable_preprocessing,
-                    'filtering_applied': True
-                }
-        else:
-            return {
-                'raw_sequence': ''.join(self.raw_predictions),
-                'frequency_sequence': freq_str,
-                'simple_sequence': sequence_str,
-                'interpretation': sequence_str,
-                'confidence': 'N/A',
-                'reasoning': 'No LLM available for interpretation',
-                'alternatives': [],
-                'frequency_groups': self.frequency_sequence,
-                'preprocessed': self.enable_preprocessing,
-                'filtering_applied': True
-            }
-
-# ============================================================================
-# Web Application
-# ============================================================================
-
-# Global objects
-classifier = None
-sentence_predictor = None
-video_preprocessor = None
-
-def init_models():
-    """Initialize the ASL classifier and sentence predictor"""
-    global classifier, sentence_predictor, video_preprocessor
+    logger.info(f"Received video file for processing")
     
     try:
-        # Initialize video preprocessor
-        video_preprocessor = VideoPreprocessor()
-        if video_preprocessor.mediapipe_available:
-            print(f"✓ Video preprocessor initialized (MediaPipe available)")
-        else:
-            print(f"⚠ Video preprocessor initialized (MediaPipe not available)")
+        # Get the file path
+        video_path = video_file if isinstance(video_file, str) else video_file.name
+        logger.info(f"Processing video: {video_path}")
         
-        # Initialize classifier
-        classifier = ASLClassifier(model_path=MODEL_PATH)
-        print(f"✓ Classifier loaded: {classifier.model_path}")
+        # Run detection
+        logger.info("Starting detection process...")
+        raw_letters, interpretation = detector.run_detection(video_path)
+        logger.info("Detection process completed successfully")
         
-        # Initialize sentence predictor with Gemini
-        if GEMINI_API_KEY:
-            sentence_predictor = SentencePredictor(
-                api_key=GEMINI_API_KEY,
-                model_name=GEMINI_MODEL
-            )
-            print(f"✓ Gemini predictor initialized: {sentence_predictor.model_name}")
-        else:
-            print("⚠ Warning: GEMINI_API_KEY not found. AI interpretation will be limited.")
-            sentence_predictor = None
-            
+        return raw_letters, interpretation
+        
     except Exception as e:
-        print(f"❌ Model initialization error: {e}")
-        raise
+        logger.error(f"Processing error: {str(e)}", exc_info=True)
+        return f"Error: {str(e)}", f"Error: {str(e)}"
 
-def process_video_with_frequency(video_path: str, progress_callback=None, preprocess=True):
-    """
-    Process video and extract ASL sequence with frequency analysis
+# Create MINIMAL Gradio interface
+with gr.Blocks(title="ASL Translator") as demo:
+    # Heading only
+    gr.Markdown("# ASL Translator")
     
-    Args:
-        video_path: Path to the video file
-        progress_callback: Optional callback for progress updates
-        preprocess: Whether to preprocess the video first
+    # Upload section
+    video_input = gr.Video(label="Upload ASL Video")
+    
+    # Process button
+    process_btn = gr.Button("Translate Video", variant="primary", size="lg")
+    
+    # Results section - only two outputs
+    with gr.Row():
+        with gr.Column():
+            raw_output = gr.Textbox(
+                label="Raw Detection", 
+                placeholder="Detected letters will appear here...",
+                interactive=False
+            )
         
-    Returns:
-        dict: Results including sequence and interpretation
-    """
-    # Create analyzer instance
-    analyzer = ASLAnalyzer(
-        video_path=video_path,
-        frame_gap=FRAME_GAP,
-        model_path=MODEL_PATH,
-        gemini_api_key=GEMINI_API_KEY,
-        gemini_model=GEMINI_MODEL,
-        confidence_threshold=CONFIDENCE_THRESHOLD,
-        outlier_std_threshold=OUTLIER_STD_THRESHOLD,
-        enable_preprocessing=ENABLE_PREPROCESSING
+        with gr.Column():
+            ai_output = gr.Textbox(
+                label="AI Interpretation", 
+                placeholder="AI interpretation will appear here...",
+                interactive=False
+            )
+    
+    # Connect button with progress indicator
+    process_btn.click(
+        fn=process_video,
+        inputs=video_input,
+        outputs=[raw_output, ai_output],
+        show_progress=True  # Show progress in UI
     )
+
+# Launch the app with logging
+if __name__ == "__main__":
+    logger.info("=" * 50)
+    logger.info("STARTING ASL TRANSLATOR APPLICATION")
+    logger.info("=" * 50)
+    logger.info(f"Model: {MODEL_PATH}")
+    logger.info(f"Frame sampling: Every {GAP} frames")
+    logger.info(f"Confidence threshold: {CONF_THRESHOLD}")
+    logger.info(f"Filter threshold: {FILTER_THRESHOLD_PERCENT}% below mean")
+    logger.info("=" * 50)
     
-    # Analyze video
-    return analyzer.analyze_video(progress_callback, preprocess)
-
-# Custom CSS for clean design
-modern_css = """
-/* Clean gradient background */
-body {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    min-height: 100vh;
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-/* Upload area styling */
-.upload-area {
-    border: 3px dashed rgba(255, 255, 255, 0.4);
-    transition: all 0.3s ease;
-    border-radius: 16px;
-    padding: 60px 40px;
-    background: rgba(255, 255, 255, 0.1);
-    backdrop-filter: blur(10px);
-    cursor: pointer;
-}
-
-.upload-area:hover {
-    border-color: rgba(255, 255, 255, 0.7);
-    background: rgba(255, 255, 255, 0.15);
-}
-
-/* Progress bar styling */
-.progress-bar {
-    height: 6px;
-    border-radius: 3px;
-    overflow: hidden;
-    background: rgba(255, 255, 255, 0.2);
-}
-
-.progress-bar .q-linear-progress__track {
-    background: linear-gradient(90deg, #4ade80, #3b82f6) !important;
-    border-radius: 3px;
-}
-
-/* Output area styling */
-.output-area {
-    background: rgba(255, 255, 255, 0.95);
-    backdrop-filter: blur(10px);
-    border-radius: 16px;
-    min-height: 120px;
-    padding: 30px;
-    animation: fadeIn 0.5s ease-out;
-}
-
-/* Preprocessing info styling */
-.preprocessing-info {
-    background: rgba(59, 130, 246, 0.1);
-    border-radius: 8px;
-    padding: 12px 16px;
-    margin-bottom: 16px;
-    border-left: 4px solid #3b82f6;
-}
-
-/* Filter info styling */
-.filter-info {
-    background: rgba(139, 92, 246, 0.1);
-    border-radius: 8px;
-    padding: 12px 16px;
-    margin-bottom: 16px;
-    border-left: 4px solid #8b5cf6;
-}
-
-/* Animation */
-@keyframes fadeIn {
-    from {
-        opacity: 0;
-        transform: translateY(10px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-/* Typography */
-.ai-output-text {
-    font-size: 1.8rem;
-    font-weight: 500;
-    line-height: 1.4;
-    color: #1f2937;
-    text-align: center;
-    margin: 0;
-}
-"""
-
-@ui.page('/')
-async def main_page():
-    """Minimal page with only drop box and output"""
-    
-    # Inject custom CSS
-    ui.add_head_html(f'<style>{modern_css}</style>')
-    
-    # State variables
-    processing = {'active': False}
-    
-    # Main container
-    with ui.column().classes('w-full min-h-screen items-center justify-center p-4 md:p-8 gap-8'):
-        
-        # Drop Box Area
-        with ui.column().classes('w-full max-w-2xl items-center gap-4'):
-            # Progress indicator (hidden by default)
-            progress_container = ui.column().classes('w-full items-center gap-3')
-            with progress_container:
-                progress_bar = ui.linear_progress(value=0).classes('progress-bar w-full')
-                progress_bar.visible = False
-                status_label = ui.label('').classes('text-white/80 text-sm')
-                status_label.visible = False
-            
-            # Preprocessing info
-            if ENABLE_PREPROCESSING and MEDIAPIPE_AVAILABLE:
-                with ui.column().classes('w-full preprocessing-info'):
-                    ui.label('🛠️ Video Preprocessing Enabled').classes('text-blue-600 font-medium text-sm')
-                    ui.label('Background will be automatically removed').classes('text-blue-500/80 text-xs')
-            
-            # Frequency filtering info
-            with ui.column().classes('w-full filter-info'):
-                ui.label('🎯 Smart Frequency Filtering Enabled').classes('text-purple-600 font-medium text-sm')
-                ui.label('Low-frequency predictions are automatically filtered out').classes('text-purple-500/80 text-xs')
-            
-            # File upload area - Drop Box
-            ui.upload(
-                on_upload=lambda e: handle_upload(e, progress_bar, status_label),
-                max_files=1,
-                auto_upload=True
-            ).props('''
-                accept="video/*"
-                label="📁 Drop ASL video here or click to browse"
-                color="white"
-                text-color="white"
-            ''').classes('upload-area w-full').style('width: 100%')
-        
-        # Output Area (hidden initially)
-        output_area = ui.column().classes('output-area w-full max-w-3xl')
-        output_area.visible = False
-        
-        # Initialize output container
-        with output_area:
-            output_container = ui.column().classes('w-full items-center justify-center')
-        
-        async def handle_upload(e, progress_bar, status_label):
-            """Handle video upload and processing with frequency analysis"""
-            if processing['active']:
-                return
-            
-            try:
-                # NiceGUI 3.2.0: e.file has async read() method
-                content = await e.file.read()
-                filename = e.file.name
-                
-                if not content:
-                    return
-                
-                # Save uploaded file
-                upload_dir = Path('./uploads')
-                upload_dir.mkdir(exist_ok=True)
-                video_path = upload_dir / (filename or 'uploaded_video.mp4')
-                
-                with open(video_path, 'wb') as f:
-                    f.write(content)
-                
-                # Show progress
-                processing['active'] = True
-                progress_bar.visible = True
-                status_label.visible = True
-                status_label.set_text('Analyzing video...')
-                
-                def update_progress(percent):
-                    progress_bar.set_value(percent / 100)
-                    status_label.set_text(f'Processing: {percent:.0f}%')
-                
-                # Process video with frequency analysis
-                result = process_video_with_frequency(str(video_path), update_progress, ENABLE_PREPROCESSING)
-                
-                # Complete progress
-                progress_bar.set_value(1.0)
-                status_label.set_text('Complete!')
-                
-                # Show output area
-                display_output(result, output_container, output_area)
-                
-                # Hide progress after delay
-                async def hide_progress():
-                    await asyncio.sleep(0.5)
-                    progress_bar.visible = False
-                    status_label.visible = False
-                    processing['active'] = False
-                
-                await hide_progress()
-                
-            except Exception as e:
-                print(f"Upload error: {e}")
-                import traceback
-                traceback.print_exc()
-                processing['active'] = False
-                progress_bar.visible = False
-                status_label.visible = False
-        
-        def display_output(result, container, area):
-            """Display enhanced results with frequency analysis"""
-            area.visible = True
-            container.clear()
-            
-            with container:
-                # Error handling
-                if 'error' in result:
-                    ui.label(f'Error: {result["error"]}').classes('text-red-500 text-center')
-                    return
-                
-                # Display preprocessing status
-                if result.get('preprocessed', False) and ENABLE_PREPROCESSING and MEDIAPIPE_AVAILABLE:
-                    ui.label('✅ Video was preprocessed (background removed)').classes('text-green-600 text-sm font-medium mb-2')
-                
-                # Display filtering status
-                if result.get('filtering_applied', False):
-                    ui.label('✅ Smart frequency filtering applied').classes('text-purple-600 text-sm font-medium mb-2')
-                
-                # Display raw sequence
-                ui.label('Raw Detection:').classes('text-gray-600 text-sm font-medium mt-2')
-                ui.label(result.get('raw_sequence', '')).classes('font-mono text-gray-800 bg-gray-100 p-2 rounded w-full text-center text-xs')
-                
-                # Display filtered frequency analysis
-                if 'frequency_groups' in result:
-                    groups_str = ', '.join([f"({letter},{count})" for letter, count in result['frequency_groups']])
-                    ui.label('Filtered Frequency Analysis:').classes('text-gray-600 text-sm font-medium mt-4')
-                    ui.label(groups_str).classes('font-mono text-blue-600 bg-blue-50 p-2 rounded w-full text-center')
-                    
-                    # Show what this means
-                    letters = [letter for letter, _ in result['frequency_groups']]
-                    if letters:
-                        ui.label(f'Filtered letters: {"".join(letters)}').classes('text-blue-500/80 text-xs mt-1 text-center')
-                
-                # Display AI interpretation
-                interpretation_text = result.get('interpretation', 'No interpretation available')
-                ui.label('AI Interpretation:').classes('text-gray-600 text-sm font-medium mt-6')
-                ui.label(interpretation_text).classes('ai-output-text mt-2 text-center')
-                
-                # Display confidence
-                if 'confidence' in result and result['confidence'] != 'N/A':
-                    confidence_color = 'text-green-500' if result['confidence'] == 'HIGH' else 'text-yellow-500' if result['confidence'] == 'MEDIUM' else 'text-red-500'
-                    ui.label(f'Confidence: {result["confidence"]}').classes(f'{confidence_color} text-sm mt-2 text-center')
-                
-                # Display reasoning if available
-                if 'reasoning' in result and result['reasoning']:
-                    ui.label('Analysis:').classes('text-gray-600 text-sm font-medium mt-4')
-                    ui.label(result['reasoning']).classes('text-gray-600 text-sm italic text-center')
-
-# ============================================================================
-# Console Interface
-# ============================================================================
-
-def console_interface():
-    """Command-line interface for the ASL analyzer"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='ASL Video Analyzer')
-    parser.add_argument('--video', '-v', default='../content/video.mp4', help='Path to video file')
-    parser.add_argument('--gap', '-g', type=int, default=10, help='Frame gap (process every Nth frame)')
-    parser.add_argument('--model', '-m', default='../model/retrained_asl_model.pt', help='Path to model')
-    parser.add_argument('--confidence', '-c', type=float, default=0.5, help='Confidence threshold')
-    parser.add_argument('--outlier', '-o', type=float, default=1.5, help='Outlier std threshold')
-    parser.add_argument('--api-key', '-k', help='Gemini API key')
-    parser.add_argument('--gemini-model', '-gm', help='Gemini model name')
-    parser.add_argument('--no-preprocess', action='store_true', help='Disable video preprocessing')
-    
-    args = parser.parse_args()
-    
-    print("🚀 Starting ASL Video Analyzer (Console Mode)")
-    print("=" * 50)
-    
-    analyzer = ASLAnalyzer(
-        video_path=args.video,
-        frame_gap=args.gap,
-        model_path=args.model,
-        gemini_api_key=args.api_key,
-        gemini_model=args.gemini_model,
-        confidence_threshold=args.confidence,
-        outlier_std_threshold=args.outlier,
-        enable_preprocessing=not args.no_preprocess
-    )
-    
-    result = analyzer.analyze_video()
-    
-    if 'error' in result:
-        print(f"\n❌ Error: {result['error']}")
-    else:
-        print(f"\n✅ Analysis Complete!")
-        print(f"Raw detection: {result['raw_sequence']}")
-        print(f"Filtered frequency analysis: {', '.join([f'({l},{c})' for l, c in result['frequency_groups']])}")
-        print(f"AI Interpretation: {result['interpretation']}")
-        print(f"Confidence: {result['confidence']}")
-        if result.get('reasoning'):
-            print(f"Reasoning: {result['reasoning']}")
-
-# ============================================================================
-# Application Startup
-# ============================================================================
-
-if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        # Run in console mode if arguments provided
-        console_interface()
-    else:
-        # Run web interface
-        print("🚀 Starting ASL Video Analyzer (Web Mode)...")
-        
-        # Initialize models
-        init_models()
-        
-        # Create uploads directory
-        Path('./uploads').mkdir(exist_ok=True)
-        Path('./preprocessed').mkdir(exist_ok=True)
-        
-        # Check MediaPipe availability
-        if MEDIAPIPE_AVAILABLE and ENABLE_PREPROCESSING:
-            print("✅ Background removal preprocessing enabled")
-        elif not MEDIAPIPE_AVAILABLE and ENABLE_PREPROCESSING:
-            print("⚠ Background removal disabled (MediaPipe not installed)")
-            print("   To enable: pip install mediapipe")
-        
-        print("\n🎯 Smart frequency filtering enabled")
-        print("   Low-frequency predictions will be automatically filtered out")
-        
-        print("\n🌟 Application ready! Open your browser to http://localhost:8080")
-        print("   Use command-line arguments for console mode.")
-        
-        # Start NiceGUI
-        ui.run(
-            title='ASL Video Analyzer',
-            port=8080,
-            reload=False,
-            show=False,
-            favicon='🤟'
+    try:
+        demo.launch(
+            share=False,
+            show_error=True,
+            quiet=False,  # Show Gradio's own logs too
+            server_name="127.0.0.1",
+            server_port=7860
         )
+    except Exception as e:
+        logger.error(f"Failed to launch application: {e}")
+        raise
