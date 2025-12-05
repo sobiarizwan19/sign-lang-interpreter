@@ -142,24 +142,29 @@ class ASLVideoDetector:
         When no hand is detected, it is represented as “SPACE”, indicating separation between words.
 
         I am providing TWO filtered versions of the same detection:
-        1 FILTER 50% — less rigorous
-        2 FILTER 20% — more rigorous
+        1) FILTER 50% — less rigorous
+        2) FILTER 20% — more rigorous
 
         Your task:
-        ➡ Return a valid English word, phrase, or sentence that is meaningful.
+        ➡ Return ONLY a valid and meaningful English word, phrase, or grammatically correct sentence.
+        ➡ It must be something a real person would logically say.
+        ➡ Do NOT return random or nonsensical combinations of words.
         ➡ Consider BOTH filtered outputs to determine the best interpretation.
         ➡ No explanation — return only the interpretation.
 
         ALPHABET CONFUSIONS (GIVE HIGH PRIORITY TO THESE WHEN DECIDING FINAL OUTPUT):
-        - More likely swapped: M ↔ N, A ↔ Y, O ↔ C
+        - More likely swapped: M ↔ N ↔ T, A ↔ Y, O ↔ C
         - More likely to be missing: D, Z, J
-        ➡ Give more importance and priority to letters belonging to the above lists when they appear or are near-conflicts.
+        ➡ Give more importance and priority to letters in this list when they appear or are near conflicts.
 
         DATA:
         FILTER 50%: {filter_50_format}
         FILTER 20%: {filter_20_format}
 
-        Return only the final interpreted English word, phrase, or sentence.
+        Return only ONE final result that is:
+        ✔ Valid English
+        ✔ Meaningful
+        ✔ Grammatically correct
         """
         
         try:
