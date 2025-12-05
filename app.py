@@ -4,19 +4,20 @@ from ultralytics import YOLO
 import time
 import os
 import google.generativeai as genai
-import gradio as gr
 import logging
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
+import tempfile
+import shutil
 
-# ===== CONFIG VARIABLES - CHANGE THESE =====
 MODEL_PATH = "./model/sign-detection.pt"
 GAP = 5
 CONF_THRESHOLD = 0.5
 GEMINI_API_KEY = "AIzaSyCv2XlAHLKQBCp6TzGk1GDiGLJ-EJ0mJ_g"
 GEMINI_MODEL = "gemini-2.5-flash"
-FILTER_THRESHOLD_PERCENT = 30  # Mean - 30% threshold
-# ===========================================
+FILTER_THRESHOLD_PERCENT = 35
+NO_HAND_CONFIDENCE_THRESHOLD = 0.1
 
-# Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,8 @@ class ASLVideoDetector:
     def __init__(self, model_path, gap, conf_threshold):
         self.GAP = gap
         self.conf_threshold = conf_threshold
+        self.no_hand_threshold = NO_HAND_CONFIDENCE_THRESHOLD
         
-        # Gemini API setup
         if GEMINI_API_KEY:
             genai.configure(api_key=GEMINI_API_KEY)
             self.gemini_model = genai.GenerativeModel(GEMINI_MODEL)
@@ -64,7 +65,7 @@ class ASLVideoDetector:
     
     def get_top_detection(self, results):
         if results[0].boxes is None or len(results[0].boxes) == 0:
-            return None, 0
+            return "SPACE", 0
         
         confidences = results[0].boxes.conf.cpu().numpy()
         class_ids = results[0].boxes.cls.cpu().numpy().astype(int)
@@ -73,11 +74,20 @@ class ASLVideoDetector:
         best_class = None
         
         for class_id, confidence in zip(class_ids, confidences):
-            if confidence > self.conf_threshold and confidence > max_confidence:
+            if confidence > max_confidence:
                 max_confidence = confidence
                 best_class = self.class_names[class_id]
         
-        return best_class, max_confidence
+        # New confidence-based logic:
+        # IF CONFIDENCE OF HIGHEST CONFIDENT BOX IS ABOVE 0.5 THEN ADD ALPHABETS
+        if max_confidence > 0.5:
+            return best_class, max_confidence
+        # IF LESS THEN 0.2 THEN ADD SPACE
+        elif max_confidence < 0.2:
+            return "SPACE", max_confidence
+        # OTHERWISE IGNORE
+        else:
+            return None, max_confidence
     
     def compress_consecutive_detections(self):
         if not self.detection_history:
@@ -86,20 +96,18 @@ class ASLVideoDetector:
         compressed = []
         current_letter = None
         current_count = 0
-        start_frame = 0
         
-        for frame_num, letter, _ in self.detection_history:
+        for frame_num, letter, confidence in self.detection_history:
             if letter != current_letter:
                 if current_letter is not None:
-                    compressed.append((current_letter, current_count, start_frame, frame_num-1))
+                    compressed.append((current_letter, current_count))
                 current_letter = letter
                 current_count = 1
-                start_frame = frame_num
             else:
                 current_count += 1
         
         if current_letter is not None:
-            compressed.append((current_letter, current_count, start_frame, self.detection_history[-1][0]))
+            compressed.append((current_letter, current_count))
         
         return compressed
     
@@ -107,13 +115,22 @@ class ASLVideoDetector:
         if not compressed_detections:
             return []
         
-        counts = [det[1] for det in compressed_detections]
+        non_space_detections = [det for det in compressed_detections if det[0] != 'SPACE']
+        
+        if not non_space_detections:
+            return compressed_detections
+        
+        counts = [det[1] for det in non_space_detections]
         mean_count = sum(counts) / len(counts)
-        threshold = mean_count * (1 - FILTER_THRESHOLD_PERCENT/100)  # Mean - 30%
+        threshold = mean_count * (1 - FILTER_THRESHOLD_PERCENT/100)
+        print(f"Mean count: {mean_count}, Threshold: {threshold}")
         
-        filtered = [det for det in compressed_detections if det[1] >= threshold]
+        filtered = []
+        for det in compressed_detections:
+            if det[1] >= threshold:
+                filtered.append(det)
         
-        return filtered, mean_count, threshold
+        return filtered
     
     def ask_gemini(self, compressed_format):
         if self.gemini_model is None:
@@ -121,10 +138,17 @@ class ASLVideoDetector:
         
         prompt = f"""
         I have ASL (American Sign Language) detection results in format (letter,count).
-        The letters should be in same order and counts represent consecutive detections.
+        Each (letter,count) pair represents a single letter held for 'count' consecutive frames.
+        The sequence of pairs represents the order of letters in the ASL message.
+        When no hand is detected, it's represented as 'SPACE' which indicates a pause between words.
         There might be outliers. Make a valid English word, phrase or sentence from it, which is grammatically correct and it makes full sense.
-        
+        NO ABBREVIATIONS WILL BE GIVEN AS INPUT TO GEMINI.
+        Sentence,phrase,word should be valid and meaningful,ONLY COMPLETE WORDS OR PHRASES OR SENTENCES.
+        Following alphabets are more likely to be swapped:
+        m<->n<->t, e<->s, a<->y
         Format: {compressed_format}
+        
+        Important: 'SPACE' indicates a space character between words. Use it appropriately.
         
         Just return the interpretation without any explanations.
         """
@@ -139,16 +163,16 @@ class ASLVideoDetector:
             return f"Error: {e}"
     
     def run_detection(self, video_path=None):
-        """Run detection on video and return results"""
         if video_path:
             self.setup_video(video_path)
         
-        # Reset history
         self.detection_history = []
         
         frame_count = 0
         processed_count = 0
         detection_count = 0
+        space_count = 0
+        ignored_count = 0
         
         logger.info(f"Starting video processing...")
         
@@ -164,7 +188,6 @@ class ASLVideoDetector:
             
             processed_count += 1
             
-            # Log progress every 50 processed frames
             if processed_count % 50 == 0:
                 logger.info(f"Processed {processed_count}/{self.total_frames//self.GAP} frames...")
             
@@ -178,127 +201,92 @@ class ASLVideoDetector:
             )
             
             best_class, confidence = self.get_top_detection(results)
-            if best_class is not None and confidence > self.conf_threshold:
-                self.detection_history.append((processed_count, best_class, confidence))
-                detection_count += 1
             
-                logger.info(f"Frame {frame_count}: Detected '{best_class}' with confidence {confidence:.2f}")
+            # Only add to history if not ignored (None)
+            if best_class is not None:
+                self.detection_history.append((processed_count, best_class, confidence))
+                
+                if best_class == "SPACE":
+                    space_count += 1
+                    logger.info(f"Frame {frame_count}: No hand detected (conf: {confidence:.2f}) - adding SPACE")
+                else:
+                    detection_count += 1
+                    logger.info(f"Frame {frame_count}: Detected '{best_class}' with confidence {confidence:.2f}")
+            else:
+                ignored_count += 1
+                logger.info(f"Frame {frame_count}: Ignored detection (conf: {confidence:.2f})")
         
         self.cap.release()
-        logger.info(f"Processing complete. Total frames: {frame_count}, Processed: {processed_count}, Detections: {detection_count}")
-        return self.get_results_summary()
+        logger.info(f"Processing complete. Total frames: {frame_count}, Processed: {processed_count}")
+        logger.info(f"Sign detections: {detection_count}, Space detections: {space_count}, Ignored: {ignored_count}")
+        return self.get_ai_interpretation()
     
-    def get_results_summary(self):
-        """Get formatted results summary - returns only raw and AI interpretation"""
+    def get_ai_interpretation(self):
         if not self.detection_history:
             logger.warning("No detections found in video.")
-            return "No signs detected", "Please try another video"
+            return "No signs detected"
         
         compressed = self.compress_consecutive_detections()
-        filtered, _, _ = self.filter_by_threshold(compressed)
+        filtered = self.filter_by_threshold(compressed)
         
         logger.info(f"Compressed {len(self.detection_history)} detections to {len(compressed)} segments")
         logger.info(f"After filtering: {len(filtered)} segments remain")
+        logger.info(f"Filtered segments: {filtered}")
         
-        # Get raw letters
-        raw_letters = "".join([letter for letter, _, _, _ in filtered])
-        logger.info(f"Raw letters detected: {raw_letters}")
+        if not filtered:
+            return "No interpretable signs detected"
         
-        # Get Gemini interpretation
-        interpretation = ""
-        if self.gemini_model is not None and filtered:
-            compressed_format = " ".join([f"({letter},{count})" for letter, count, _, _ in filtered])
-            logger.info(f"Sending to Gemini: {compressed_format}")
-            interpretation = self.ask_gemini(compressed_format)
-            logger.info(f"Gemini interpretation: {interpretation}")
+        compressed_format = " ".join([f"({letter},{count})" for letter, count in filtered])
+        logger.info(f"Sending to Gemini: {compressed_format}")
         
-        return raw_letters, interpretation
+        interpretation = self.ask_gemini(compressed_format)
+        logger.info(f"Gemini interpretation: {interpretation}")
+        
+        return interpretation
 
-# Initialize detector
 detector = ASLVideoDetector(
     model_path=MODEL_PATH,
     gap=GAP,
     conf_threshold=CONF_THRESHOLD
 )
 
-def process_video(video_file):
-    """Process uploaded video file - with proper logging"""
-    if video_file is None:
-        logger.warning("No video file uploaded")
-        return "Upload a video first", "Upload a video first"
+app = FastAPI(title="ASL Translator API")
+
+@app.post("/translate")
+async def translate_video(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv')):
+        return JSONResponse(content={"error": "Invalid file type. Please upload a video file."}, status_code=400)
     
-    logger.info(f"Received video file for processing")
-    
+    temp_dir = tempfile.mkdtemp()
     try:
-        # Get the file path
-        video_path = video_file if isinstance(video_file, str) else video_file.name
-        logger.info(f"Processing video: {video_path}")
+        temp_file_path = os.path.join(temp_dir, file.filename)
         
-        # Run detection
-        logger.info("Starting detection process...")
-        raw_letters, interpretation = detector.run_detection(video_path)
-        logger.info("Detection process completed successfully")
+        with open(temp_file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
         
-        return raw_letters, interpretation
+        interpretation = detector.run_detection(temp_file_path)
         
+        return JSONResponse(content={"interpretation": interpretation})
+    
     except Exception as e:
         logger.error(f"Processing error: {str(e)}", exc_info=True)
-        return f"Error: {str(e)}", f"Error: {str(e)}"
+        return JSONResponse(content={"error": f"Processing failed: {str(e)}"}, status_code=500)
+    
+    finally:
+        shutil.rmtree(temp_dir)
 
-# Create MINIMAL Gradio interface
-with gr.Blocks(title="ASL Translator") as demo:
-    # Heading only
-    gr.Markdown("# ASL Translator")
-    
-    # Upload section
-    video_input = gr.Video(label="Upload ASL Video")
-    
-    # Process button
-    process_btn = gr.Button("Translate Video", variant="primary", size="lg")
-    
-    # Results section - only two outputs
-    with gr.Row():
-        with gr.Column():
-            raw_output = gr.Textbox(
-                label="Raw Detection", 
-                placeholder="Detected letters will appear here...",
-                interactive=False
-            )
-        
-        with gr.Column():
-            ai_output = gr.Textbox(
-                label="AI Interpretation", 
-                placeholder="AI interpretation will appear here...",
-                interactive=False
-            )
-    
-    # Connect button with progress indicator
-    process_btn.click(
-        fn=process_video,
-        inputs=video_input,
-        outputs=[raw_output, ai_output],
-        show_progress=True  # Show progress in UI
-    )
-
-# Launch the app with logging
 if __name__ == "__main__":
+    import uvicorn
     logger.info("=" * 50)
-    logger.info("STARTING ASL TRANSLATOR APPLICATION")
+    logger.info("STARTING ASL TRANSLATOR API")
     logger.info("=" * 50)
     logger.info(f"Model: {MODEL_PATH}")
     logger.info(f"Frame sampling: Every {GAP} frames")
     logger.info(f"Confidence threshold: {CONF_THRESHOLD}")
+    logger.info(f"No hand threshold: {NO_HAND_CONFIDENCE_THRESHOLD}")
     logger.info(f"Filter threshold: {FILTER_THRESHOLD_PERCENT}% below mean")
+    logger.info("NEW LOGIC: >0.5 = ADD ALPHABET, <0.2 = ADD SPACE, 0.2-0.5 = IGNORE")
+    logger.info("Compressed format: (alphabet/space, count) only")
     logger.info("=" * 50)
     
-    try:
-        demo.launch(
-            share=False,
-            show_error=True,
-            quiet=False,  # Show Gradio's own logs too
-            server_name="127.0.0.1",
-            server_port=7860
-        )
-    except Exception as e:
-        logger.error(f"Failed to launch application: {e}")
-        raise
+    uvicorn.run(app, host="127.0.0.1", port=8000)
