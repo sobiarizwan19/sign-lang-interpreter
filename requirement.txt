@@ -1,22 +1,15 @@
-# Core NiceGUI Application Dependencies
-nicegui==3.2.0
+# Core dependencies
+ultralytics==8.0.0
+opencv-python==4.8.1.78
+numpy==1.24.3
+gradio==6.0.2
 
-# Computer Vision and AI Dependencies
-opencv-python>=4.8.0
-ultralytics>=8.0.0
-Pillow>=10.0.0
+# Google Gemini AI
+google-generativeai==0.3.0
 
-# Google Generative AI for sentence prediction
-google-generativeai>=0.3.0
+# Video processing
+pillow==10.0.0
 
-# Additional utilities
-pathlib2>=2.3.0
-numpy>=1.24.0
-torch>=2.0.0
-torchvision>=0.15.0
-
-# Optional: For better video codec support
-imageio-ffmpeg>=0.4.0
-
-# Preprocessing
-mediapipe
+# Utilities
+python-multipart==0.0.6
+httpx==0.24.1
