@@ -11,15 +11,18 @@ import tempfile
 import shutil
 
 MODEL_PATH = "./model/sign-detection.pt"
-GAP = 5
+GAP = 3
 CONF_THRESHOLD = 0.5
 GEMINI_API_KEY = "AIzaSyCv2XlAHLKQBCp6TzGk1GDiGLJ-EJ0mJ_g"
 GEMINI_MODEL = "gemini-2.5-flash"
-FILTER_THRESHOLD_PERCENT_50 = 50  # First filter: 50% less rigorous
-FILTER_THRESHOLD_PERCENT_20 = 20  # Second filter: 20% 
-NO_HAND_CONFIDENCE_THRESHOLD = 0.1
+NO_HAND_CONFIDENCE_THRESHOLD = 0.2
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Filtering parameters
+INITIAL_FILTER_THRESHOLD = 2
+FINAL_FILTER_THRESHOLD = 15
+FILTER_INCREMENT = 3
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class ASLVideoDetector:
@@ -31,20 +34,20 @@ class ASLVideoDetector:
         if GEMINI_API_KEY:
             genai.configure(api_key=GEMINI_API_KEY)
             self.gemini_model = genai.GenerativeModel(GEMINI_MODEL)
-            logger.info("Gemini API configured successfully")
-        else:
-            logger.warning("Gemini API key not set. Interpretation will be skipped.")
-            self.gemini_model = None
         
         logger.info(f"Loading model: {model_path}")
         self.model = YOLO(model_path)
         self.model.fuse()
-        logger.info(f"Model loaded: {self.model.names}")
         
         self.cap = None
         self.video_path = None
         self.class_names = self.model.names
         self.detection_history = []
+        
+        self.current_letter = None
+        self.current_letter_start_frame = None
+        self.current_letter_count = 0
+        self.current_letter_confidences = []
         
     def setup_video(self, video_path):
         if not os.path.exists(video_path):
@@ -59,9 +62,6 @@ class ASLVideoDetector:
             return False
         
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        logger.info(f"Video loaded: {video_path}")
-        logger.info(f"Total frames: {self.total_frames}")
-        logger.info(f"Config: GAP={self.GAP}, CONF={self.conf_threshold}")
         return True
     
     def get_top_detection(self, results):
@@ -79,15 +79,35 @@ class ASLVideoDetector:
                 max_confidence = confidence
                 best_class = self.class_names[class_id]
         
-        # New confidence-based logic:
-        # IF CONFIDENCE OF HIGHEST CONFIDENT BOX IS ABOVE 0.5 THEN ADD ALPHABETS
         if max_confidence > self.conf_threshold:
             return best_class, max_confidence
         elif max_confidence < self.no_hand_threshold:
             return "SPACE", max_confidence
-        # OTHERWISE IGNORE
         else:
             return None, max_confidence
+    
+    def log_consecutive_detection(self, frame_num, letter, confidence):
+        if letter != self.current_letter:
+            if self.current_letter is not None:
+                if self.current_letter_start_frame == frame_num - self.GAP:
+                    logger.info(f"Frame {self.current_letter_start_frame}: Detected '{self.current_letter}'")
+                else:
+                    logger.info(f"Frame {self.current_letter_start_frame}-{frame_num-self.GAP}: Detected '{self.current_letter}'")
+            
+            self.current_letter = letter
+            self.current_letter_start_frame = frame_num
+            self.current_letter_count = 1
+            self.current_letter_confidences = [confidence]
+        else:
+            self.current_letter_count += 1
+            self.current_letter_confidences.append(confidence)
+    
+    def finalize_logging(self):
+        if self.current_letter is not None:
+            if self.current_letter_count == 1:
+                logger.info(f"Frame {self.current_letter_start_frame}: Detected '{self.current_letter}'")
+            else:
+                logger.info(f"Frame {self.current_letter_start_frame}+: Detected '{self.current_letter}'")
     
     def compress_consecutive_detections(self):
         if not self.detection_history:
@@ -111,69 +131,89 @@ class ASLVideoDetector:
         
         return compressed
     
-    def filter_by_threshold(self, compressed_detections, threshold_percent):
+    def merge_consecutive_same(self, detections):
+        if not detections:
+            return []
+        
+        merged = []
+        current_item = None
+        current_total_count = 0
+        
+        for item, count in detections:
+            if item != current_item:
+                if current_item is not None:
+                    merged.append((current_item, current_total_count))
+                current_item = item
+                current_total_count = count
+            else:
+                current_total_count += count
+        
+        if current_item is not None:
+            merged.append((current_item, current_total_count))
+        
+        return merged
+    
+    def apply_recursive_filter(self, compressed_detections):
         if not compressed_detections:
             return []
         
-        non_space_detections = [det for det in compressed_detections if det[0] != 'SPACE']
+        current_threshold = INITIAL_FILTER_THRESHOLD
+        current_data = compressed_detections.copy()
         
-        if not non_space_detections:
-            return compressed_detections
+        while current_threshold <= FINAL_FILTER_THRESHOLD:
+            filtered_data = []
+            for item, count in current_data:
+                if count >= current_threshold:
+                    filtered_data.append((item, count))
+            
+            grouped_data = self.merge_consecutive_same(filtered_data)
+            current_data = grouped_data
+            current_threshold += FILTER_INCREMENT
         
-        counts = [det[1] for det in non_space_detections]
-        mean_count = sum(counts) / len(counts)
-        threshold = mean_count * (1 - threshold_percent/100)
-        logger.info(f"Filtering with threshold: {threshold:.2f} (Mean: {mean_count:.2f}, Percent: {threshold_percent}%)")
-        filtered = []
-        for det in compressed_detections:
-            if det[1] >= threshold:
-                filtered.append(det)
-        
-        return filtered
+        return current_data
     
-    def ask_gemini(self, filter_50_format, filter_20_format):
+    def ask_gemini(self, filtered_format):
         if self.gemini_model is None:
             return "Gemini API key not configured"
         
         prompt = f"""
         I have ASL (American Sign Language) detection results in format (letter, count).
-        Each (letter, count) pair represents a single letter held for “count” consecutive frames.
+        Each (letter, count) pair represents a single letter held for "count" consecutive frames.
         The sequence of pairs represents the order of letters in the ASL message.
-        When no hand is detected, it is represented as “SPACE”, indicating separation between words.
-
-        I am providing TWO filtered versions of the same detection:
-        1) FILTER 50% — less rigorous
-        2) FILTER 20% — more rigorous
+        When no hand is detected, it is represented as "SPACE", indicating separation between words.
 
         Your task:
         ➡ Return ONLY a valid and meaningful English word, phrase, or grammatically correct sentence.
         ➡ It must be something a real person would logically say.
-        ➡ Do NOT return random or nonsensical combinations of words.
-        ➡ Consider BOTH filtered outputs to determine the best interpretation.
-        ➡ No explanation — return only the interpretation.
+        ➡ Do NOT invent random or excessive additional letters.
+        ➡ Prefer interpretations that use only the detected letters.
+        ➡ "SPACE" in the data indicates word boundaries.
 
-        ALPHABET CONFUSIONS (GIVE HIGH PRIORITY TO THESE WHEN DECIDING FINAL OUTPUT):
-        - More likely swapped: M ↔ N ↔ T, A ↔ Y, O ↔ C
-        - More likely to be missing: D, Z, J
-        ➡ Give more importance and priority to letters in this list when they appear or are near conflicts.
+        IMPORTANT RULES:
+        1. Use primarily the letters that appear in the filtered data
+        2. If a letter **does NOT appear at all**, do NOT assume it unless absolutely necessary
+        3. "SPACE" represents separation between words in the final sentence
+        4. Respect the sequence and grouping of letters as shown
 
-        DATA:
-        FILTER 50%: {filter_50_format}
-        FILTER 20%: {filter_20_format}
+        ALPHABET CONFUSIONS (ONLY WHEN NECESSARY):
+        - Possible swaps: M ↔ N ↔ T, A ↔ Y, O ↔ C
+        - Possible omissions: D, Z, J
+        ➡ Use these ONLY to resolve ambiguity, not to create new random words.
 
-        Return only ONE final result that is:
+        FILTERED DATA: {filtered_format}
+
+        Return only ONE final result:
         ✔ Valid English
         ✔ Meaningful
-        ✔ Grammatically correct
+        ✔ Uses primarily detected letters
+        ✔ Grammatically correct (if a sentence)
+        ✔ Respects SPACE as word separators
         """
         
         try:
-            logger.info("Asking Gemini for interpretation...")
             response = self.gemini_model.generate_content(prompt)
-            logger.info(f"Gemini response received: {response.text[:50]}...")
             return response.text.strip()
         except Exception as e:
-            logger.error(f"Gemini API error: {e}")
             return f"Error: {e}"
     
     def run_detection(self, video_path=None):
@@ -182,13 +222,15 @@ class ASLVideoDetector:
         
         self.detection_history = []
         
+        self.current_letter = None
+        self.current_letter_start_frame = None
+        self.current_letter_count = 0
+        self.current_letter_confidences = []
+        
         frame_count = 0
         processed_count = 0
-        detection_count = 0
-        space_count = 0
-        ignored_count = 0
         
-        logger.info(f"Starting video processing...")
+        logger.info("Starting video processing...")
         
         while True:
             ret, frame = self.cap.read()
@@ -202,9 +244,6 @@ class ASLVideoDetector:
             
             processed_count += 1
             
-            if processed_count % 50 == 0:
-                logger.info(f"Processed {processed_count}/{self.total_frames//self.GAP} frames...")
-            
             results = self.model.predict(
                 source=frame,
                 conf=self.conf_threshold,
@@ -216,50 +255,32 @@ class ASLVideoDetector:
             
             best_class, confidence = self.get_top_detection(results)
             
-            # Only add to history if not ignored (None)
             if best_class is not None:
                 self.detection_history.append((processed_count, best_class, confidence))
-                
-                if best_class == "SPACE":
-                    space_count += 1
-                    logger.info(f"Frame {frame_count}: No hand detected (conf: {confidence:.2f}) - adding SPACE")
-                else:
-                    detection_count += 1
-                    logger.info(f"Frame {frame_count}: Detected '{best_class}' with confidence {confidence:.2f}")
+                self.log_consecutive_detection(frame_count, best_class, confidence)
             else:
-                ignored_count += 1
-                logger.info(f"Frame {frame_count}: Ignored detection (conf: {confidence:.2f})")
+                if self.current_letter is not None:
+                    self.log_consecutive_detection(frame_count, None, confidence)
+        
+        self.finalize_logging()
         
         self.cap.release()
-        logger.info(f"Processing complete. Total frames: {frame_count}, Processed: {processed_count}")
-        logger.info(f"Sign detections: {detection_count}, Space detections: {space_count}, Ignored: {ignored_count}")
+        logger.info("Processing complete.")
         return self.get_ai_interpretation()
     
     def get_ai_interpretation(self):
         if not self.detection_history:
-            logger.warning("No detections found in video.")
             return "No signs detected"
         
-        # Get compressed version
         compressed = self.compress_consecutive_detections()
+        filtered_result = self.apply_recursive_filter(compressed)
         
-        # Apply both filters
-        filter_50_result = self.filter_by_threshold(compressed, FILTER_THRESHOLD_PERCENT_50)
-        filter_20_result = self.filter_by_threshold(compressed, FILTER_THRESHOLD_PERCENT_20)
+        logger.info(f"Final filtered list: {filtered_result}")
         
-        logger.info(f"Compressed {len(self.detection_history)} detections to {len(compressed)} segments")
-        logger.info(f"Filter 50%: {len(filter_50_result)} segments")
-        logger.info(f"Filter 20%: {len(filter_20_result)} segments")
+        filtered_format = " ".join([f"({letter},{count})" for letter, count in filtered_result]) if filtered_result else "No results"
         
-        # Format both filtered results
-        filter_50_format = " ".join([f"({letter},{count})" for letter, count in filter_50_result]) if filter_50_result else "No results"
-        filter_20_format = " ".join([f"({letter},{count})" for letter, count in filter_20_result]) if filter_20_result else "No results"
-        
-        logger.info(f"Filter 50%: {filter_50_format}")
-        logger.info(f"Filter 20%: {filter_20_format}")
-        
-        interpretation = self.ask_gemini(filter_50_format, filter_20_format)
-        logger.info(f"Gemini interpretation: {interpretation}")
+        interpretation = self.ask_gemini(filtered_format)
+        logger.info(f"AI Interpretation: {interpretation}")
         
         return interpretation
 
@@ -288,7 +309,7 @@ async def translate_video(file: UploadFile = File(...)):
         return JSONResponse(content={"interpretation": interpretation})
     
     except Exception as e:
-        logger.error(f"Processing error: {str(e)}", exc_info=True)
+        logger.error(f"Processing error: {str(e)}")
         return JSONResponse(content={"error": f"Processing failed: {str(e)}"}, status_code=500)
     
     finally:
@@ -296,16 +317,4 @@ async def translate_video(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info("=" * 50)
-    logger.info("STARTING ASL TRANSLATOR API")
-    logger.info("=" * 50)
-    logger.info(f"Model: {MODEL_PATH}")
-    logger.info(f"Frame sampling: Every {GAP} frames")
-    logger.info(f"Confidence threshold: {CONF_THRESHOLD}")
-    logger.info(f"No hand threshold: {NO_HAND_CONFIDENCE_THRESHOLD}")
-    logger.info(f"Filter 1 (50%): Less rigorous filtering")
-    logger.info(f"Filter 2 (20%): More rigorous filtering")
-    logger.info("SENDING BOTH FILTERED VERSIONS TO LLM")
-    logger.info("=" * 50)
-    
     uvicorn.run(app, host="127.0.0.1", port=8002)
