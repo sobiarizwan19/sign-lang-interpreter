@@ -15,7 +15,8 @@ GAP = 5
 CONF_THRESHOLD = 0.5
 GEMINI_API_KEY = "AIzaSyCv2XlAHLKQBCp6TzGk1GDiGLJ-EJ0mJ_g"
 GEMINI_MODEL = "gemini-2.5-flash"
-FILTER_THRESHOLD_PERCENT = 30
+FILTER_THRESHOLD_PERCENT_50 = 50  # First filter: 50% less rigorous
+FILTER_THRESHOLD_PERCENT_20 = 20  # Second filter: 20% 
 NO_HAND_CONFIDENCE_THRESHOLD = 0.1
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -110,7 +111,7 @@ class ASLVideoDetector:
         
         return compressed
     
-    def filter_by_threshold(self, compressed_detections):
+    def filter_by_threshold(self, compressed_detections, threshold_percent):
         if not compressed_detections:
             return []
         
@@ -121,9 +122,8 @@ class ASLVideoDetector:
         
         counts = [det[1] for det in non_space_detections]
         mean_count = sum(counts) / len(counts)
-        threshold = mean_count * (1 - FILTER_THRESHOLD_PERCENT/100)
-        print(f"Mean count: {mean_count}, Threshold: {threshold}")
-        
+        threshold = mean_count * (1 - threshold_percent/100)
+        logger.info(f"Filtering with threshold: {threshold:.2f} (Mean: {mean_count:.2f}, Percent: {threshold_percent}%)")
         filtered = []
         for det in compressed_detections:
             if det[1] >= threshold:
@@ -131,7 +131,7 @@ class ASLVideoDetector:
         
         return filtered
     
-    def ask_gemini(self, compressed_format):
+    def ask_gemini(self, filter_50_format, filter_20_format):
         if self.gemini_model is None:
             return "Gemini API key not configured"
         
@@ -140,14 +140,23 @@ class ASLVideoDetector:
         Each (letter,count) pair represents a single letter held for 'count' consecutive frames.
         The sequence of pairs represents the order of letters in the ASL message.
         When no hand is detected, it's represented as 'SPACE' which indicates a pause between words.
-        There might be outliers. Make a valid English word, phrase or sentence from it, which is grammatically correct and it makes full sense.
-        NO ABBREVIATIONS WILL BE GIVEN AS INPUT TO GEMINI.
-        Sentence,phrase,word should be valid and meaningful,ONLY COMPLETE WORDS OR PHRASES OR SENTENCES.
-        Following alphabets are more likely to be swapped:
-        m<->n<->t, e<->s, a<->y
-        Format: {compressed_format}
         
-        Important: 'SPACE' indicates a space character between words. Use it appropriately.
+        I'm providing you with TWO filtered versions of the same detection:
+        1. FILTER 50%: Less rigorous filtering (50% threshold)
+        2. FILTER 20%: More rigorous filtering (20% threshold)
+        
+        Make a valid English word, phrase or sentence from it.
+        SENTANCE ,PHRASE OR WORD MUST BE IN ENGLISH LANGUAGE,VALID AND MAKE SENSE.
+        Consider both filtered versions to make the best interpretation.
+        
+        FOLLOWING ALPHABETS ARE MORE LIKELY TO BE SWAPPED:
+        'M' and 'N'
+        'A' and 'Y'
+        'O' and 'C'
+        FOLLOWING ALPHABETS ARE MORE LIKELY TO BE MISSED:
+        'D','Z','J'
+        FILTER 50%: {filter_50_format}
+        FILTER 20%: {filter_20_format}
         
         Just return the interpretation without any explanations.
         """
@@ -225,20 +234,25 @@ class ASLVideoDetector:
             logger.warning("No detections found in video.")
             return "No signs detected"
         
+        # Get compressed version
         compressed = self.compress_consecutive_detections()
-        filtered = self.filter_by_threshold(compressed)
+        
+        # Apply both filters
+        filter_50_result = self.filter_by_threshold(compressed, FILTER_THRESHOLD_PERCENT_50)
+        filter_20_result = self.filter_by_threshold(compressed, FILTER_THRESHOLD_PERCENT_20)
         
         logger.info(f"Compressed {len(self.detection_history)} detections to {len(compressed)} segments")
-        logger.info(f"After filtering: {len(filtered)} segments remain")
-        logger.info(f"Filtered segments: {filtered}")
+        logger.info(f"Filter 50%: {len(filter_50_result)} segments")
+        logger.info(f"Filter 20%: {len(filter_20_result)} segments")
         
-        if not filtered:
-            return "No interpretable signs detected"
+        # Format both filtered results
+        filter_50_format = " ".join([f"({letter},{count})" for letter, count in filter_50_result]) if filter_50_result else "No results"
+        filter_20_format = " ".join([f"({letter},{count})" for letter, count in filter_20_result]) if filter_20_result else "No results"
         
-        compressed_format = " ".join([f"({letter},{count})" for letter, count in filtered])
-        logger.info(f"Sending to Gemini: {compressed_format}")
+        logger.info(f"Filter 50%: {filter_50_format}")
+        logger.info(f"Filter 20%: {filter_20_format}")
         
-        interpretation = self.ask_gemini(compressed_format)
+        interpretation = self.ask_gemini(filter_50_format, filter_20_format)
         logger.info(f"Gemini interpretation: {interpretation}")
         
         return interpretation
@@ -283,9 +297,9 @@ if __name__ == "__main__":
     logger.info(f"Frame sampling: Every {GAP} frames")
     logger.info(f"Confidence threshold: {CONF_THRESHOLD}")
     logger.info(f"No hand threshold: {NO_HAND_CONFIDENCE_THRESHOLD}")
-    logger.info(f"Filter threshold: {FILTER_THRESHOLD_PERCENT}% below mean")
-    logger.info("NEW LOGIC: >0.5 = ADD ALPHABET, <0.2 = ADD SPACE, 0.2-0.5 = IGNORE")
-    logger.info("Compressed format: (alphabet/space, count) only")
+    logger.info(f"Filter 1 (50%): Less rigorous filtering")
+    logger.info(f"Filter 2 (20%): More rigorous filtering")
+    logger.info("SENDING BOTH FILTERED VERSIONS TO LLM")
     logger.info("=" * 50)
     
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8002)
