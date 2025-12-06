@@ -3,20 +3,22 @@
 ASL Video Test Script with Partial Word Match Percentage
 Tests videos against API and calculates match percentage.
 
-Usage:
-1. Test all videos: Set SPECIFIC_FILE = None
-2. Test specific video: Set SPECIFIC_FILE = "filename.mp4"
+Loads configuration from .env
 """
 
 import os
 import requests
 import time
+from dotenv import load_dotenv
 
-# Configuration
-API_URL = "http://127.0.0.1:8000/translate"
-CONTENT_DIR = "./content"
-# SPECIFIC_FILE = "good-morning.mp4"  # Set to filename or None
-SPECIFIC_FILE = None  # Test all videos
+# Load .env values
+load_dotenv()
+
+# Configuration from .env
+API_URL = os.getenv("TEST_API_URL")
+CONTENT_DIR = os.getenv("TEST_CONTENT_DIR")
+SPECIFIC_FILE = os.getenv("TEST_SPECIFIC_FILE")
+
 def filename_to_expected(filename):
     """Convert filename to expected text."""
     expected = filename.replace('.mp4', '').replace('-', ' ')
@@ -31,19 +33,15 @@ def calculate_match_percentage(expected, actual):
     expected_words = expected.lower().split()
     actual_words = actual.lower().split()
     
-    # Exact match
     if expected.lower().strip() == actual.lower().strip():
         return 100
     
-    # Count matched words
     matched_count = sum(1 for word in expected_words if word in actual_words)
     
-    # Partial match: proportion of words matched out of total, scaled to 80%
     if matched_count > 0:
         partial_score = (matched_count / len(expected_words)) * 80
         return round(partial_score, 1)
     
-    # No words matched
     return 0
 
 def test_video(video_path):
@@ -62,7 +60,6 @@ def test_video(video_path):
             if response.status_code == 200:
                 result = response.json()
                 
-                # FIX HERE: Change 'interpretation' to 'translation'
                 translation = result.get('translation', '')
                 
                 print(f"AI Result: '{translation}'")
@@ -90,7 +87,6 @@ def main():
     print("🧪 ASL Video Tester")
     print("=" * 50)
     
-    # Get video files
     video_files = []
     
     if SPECIFIC_FILE:
@@ -119,7 +115,6 @@ def main():
         total_percent += match_percent
         time.sleep(1)
     
-    # Summary
     print("\n" + "=" * 50)
     print("SUMMARY:")
     print(f"Total Videos: {total}")
@@ -127,9 +122,8 @@ def main():
     print("=" * 50)
 
 if __name__ == "__main__":
-    # Check if API is running
     try:
-        requests.get("http://127.0.0.1:8000", timeout=5)
+        requests.get(API_URL.replace("/translate", ""), timeout=5)
         print("✅ API is running")
     except:
         print("❌ API not running! Start with: python app.py")
