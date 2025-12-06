@@ -1,3 +1,11 @@
-content/*
-venv/*
+# Ignore Python cache
+__pycache__/
+*/__pycache__/*
+**/__pycache__/*
+
+# Ignore env + config
+venv/
 .env
+
+# Ignore content folder
+content/
