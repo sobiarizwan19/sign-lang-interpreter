@@ -61,11 +61,13 @@ def test_video(video_path):
             
             if response.status_code == 200:
                 result = response.json()
-                interpretation = result.get('interpretation', '')
                 
-                print(f"AI Result: '{interpretation}'")
+                # FIX HERE: Change 'interpretation' to 'translation'
+                translation = result.get('translation', '')
                 
-                match_percent = calculate_match_percentage(expected, interpretation)
+                print(f"AI Result: '{translation}'")
+                
+                match_percent = calculate_match_percentage(expected, translation)
                 
                 if match_percent == 100:
                     print("✅ EXACT MATCH! (100%)")
