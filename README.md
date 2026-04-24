@@ -299,9 +299,6 @@ The application provides detailed logging at `INFO` level:
 - Use HTTPS for API endpoints in production
 - Consider authentication for API access
 
-## 📜 License
-
-[Add your license here]
 
 ## 🤝 Contributing
 
